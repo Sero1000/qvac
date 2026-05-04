@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -33,6 +34,20 @@ using qvac_errors::general_error::InvalidArgument;
   throw StatusError(InvalidArgument, msg);
 }
 
+void printGgufMetadataKeys(const gguf_context* gguf) {
+  if (gguf == nullptr) {
+    std::cout << "[MobileNetGraph] GGUF context is null; cannot print metadata keys\n";
+    return;
+  }
+
+  const int64_t metadataCount = gguf_get_n_kv(gguf);
+  std::cout << "[MobileNetGraph] GGUF metadata keys (" << metadataCount << ")\n";
+  for (int64_t i = 0; i < metadataCount; ++i) {
+    const char* key = gguf_get_key(gguf, i);
+    std::cout << "  - " << (key != nullptr ? key : "<null>") << '\n';
+  }
+}
+
 /// Tensors whose first dim is F16 are treated as storage-only; everything
 /// used in runtime math (BN-folded scale/shift, FC weights) is kept as F32
 /// to avoid per-layer cast operations inside the compute graph.
@@ -49,13 +64,13 @@ void fp16ToFp32(const void* src, float* out, size_t count) {
 /// to `bundleCtx`, reusing the original dtype and shape. Returns the new
 /// tensor pointer.
 struct ggml_tensor* cloneRaw(
-    struct ggml_context* bundleCtx, const gguf_context* gguf,
-    struct ggml_context* ggufCtx, const char* name) {
-  const int idx = gguf_find_tensor(gguf, name);
+    struct ggml_context* bundleCtx, const gguf_context* ggufCtx,
+    struct ggml_context* ggmlCtx, const char* name) {
+  const int idx = gguf_find_tensor(ggufCtx, name);
   if (idx < 0) {
     raise(std::string("Missing tensor in GGUF: ") + name);
   }
-  struct ggml_tensor* src = ggml_get_tensor(ggufCtx, name);
+  struct ggml_tensor* src = ggml_get_tensor(ggmlCtx, name);
   if (src == nullptr) {
     raise(std::string("Cannot resolve tensor from ggml ctx: ") + name);
   }
@@ -104,6 +119,8 @@ std::vector<float> loadVector1d(
 
 /// Applies folded BatchNorm inline: `x * scale + shift` with pre-reshaped
 /// [1, 1, C, 1] scale/shift broadcasted across [W, H, C, 1].
+// TODO The form here is just affine transformation form. 
+// Folded would mean to just merge it with convolution.
 struct ggml_tensor* applyFoldedBn(
     struct ggml_context* ctx, struct ggml_tensor* x,
     struct ggml_tensor* scale, struct ggml_tensor* shift) {
@@ -123,8 +140,8 @@ struct GraphBuilder {
     return it->second;
   }
 
-  /// Activation selection: HardSwish for newer-block layers, ReLU for early
-  /// layers, exactly matching torchvision's MobileNetV3-Small config.
+  /// Activation selection: HardSwish for later blocks, ReLU for early
+  /// layers, matching torchvision's MobileNetV3-Large config.
   struct ggml_tensor* activate(struct ggml_tensor* x, bool useHardswish) {
     return useHardswish ? ggml_hardswish(ctx, x) : ggml_relu(ctx, x);
   }
@@ -184,9 +201,10 @@ struct GraphBuilder {
 
   /// One torchvision InvertedResidual block.
   struct ggml_tensor* invertedResidual(
-      struct ggml_tensor* x, const BlockConfig& cfg, int inputSpatialHw) {
-    const std::string base = "features." + std::to_string(cfg.featuresIndex);
-    const bool hasExpand = cfg.expandedChannels != cfg.inputChannels;
+      struct ggml_tensor* x, const BlockConfig& cfg, int featuresIndex,
+      int inputSpatialHw) {
+    const std::string base = "features." + std::to_string(featuresIndex);
+    const bool hasExpand = cfg.expansionSize != cfg.inputChannels;
 
     int spatial = inputSpatialHw;
     struct ggml_tensor* y = x;
@@ -219,7 +237,7 @@ struct GraphBuilder {
     // Depthwise.
     const std::string dwPrefix = base + ".block." + std::to_string(dwBlockIdx);
     y = dwConvBnAct(
-        y, dwPrefix + ".0", dwPrefix + ".1", cfg.stride, cfg.depthwiseKernel,
+          y, dwPrefix + ".0", dwPrefix + ".1", cfg.stride, cfg.depthwiseKernel,
         cfg.useHardswish);
     if (cfg.stride == 2) {
       spatial = (spatial + 1) / 2;
@@ -284,11 +302,17 @@ ComputeGraph::ComputeGraph(ComputeGraph&& other) noexcept
     : ctx(std::move(other.ctx)),
       graph(other.graph),
       input(other.input),
-      output(other.output),
+      output_1(other.output_1),
+      output_2(other.output_2),
+      output_3(other.output_3),
+      output_4(other.output_4),
       backendBuffer(other.backendBuffer) {
   other.graph = nullptr;
   other.input = nullptr;
-  other.output = nullptr;
+  other.output_1 = nullptr;
+  other.output_2 = nullptr;
+  other.output_3 = nullptr;
+  other.output_4 = nullptr;
   other.backendBuffer = nullptr;
 }
 
@@ -298,11 +322,14 @@ ComputeGraph& ComputeGraph::operator=(ComputeGraph&& other) noexcept {
     ctx = std::move(other.ctx);
     graph = other.graph;
     input = other.input;
-    output = other.output;
+    output_1 = other.output_1;
+    output_2 = other.output_2;
+    output_3 = other.output_3;
+    output_4 = other.output_4;
     backendBuffer = other.backendBuffer;
     other.graph = nullptr;
     other.input = nullptr;
-    other.output = nullptr;
+    other.output_4 = nullptr;
     other.backendBuffer = nullptr;
   }
   return *this;
@@ -311,7 +338,7 @@ ComputeGraph& ComputeGraph::operator=(ComputeGraph&& other) noexcept {
 void ComputeGraph::reset() {
   graph = nullptr;
   input = nullptr;
-  output = nullptr;
+  output_4 = nullptr;
   ctx.reset();
   if (backendBuffer != nullptr) {
     ggml_backend_buffer_free(backendBuffer);
@@ -325,15 +352,16 @@ WeightsBundle loadWeights(
   outLabels.clear();
   // Load the GGUF into a private ggml ctx so the inspected tensors stay
   // accessible long enough to copy their bytes into our backend buffer.
-  struct ggml_context* ggufCtx = nullptr;
-  gguf_init_params params{/*no_alloc=*/false, &ggufCtx};
+  struct ggml_context* ggmlCtx = nullptr;
+  gguf_init_params params{/*no_alloc=*/false, &ggmlCtx};
   gguf_context* gguf = gguf_init_from_file(ggufPath.c_str(), params);
   if (gguf == nullptr) {
     raiseInvalid("Failed to open GGUF file: " + ggufPath);
   }
   std::unique_ptr<gguf_context, decltype(&gguf_free)> ggufGuard(gguf, gguf_free);
-  std::unique_ptr<struct ggml_context, decltype(&ggml_free)> ggufCtxGuard(
-      ggufCtx, ggml_free);
+  std::unique_ptr<struct ggml_context, decltype(&ggml_free)> ggmlCtxGuard(
+      ggmlCtx, ggml_free);
+  printGgufMetadataKeys(gguf);
 
   // Read BN epsilon metadata and fall back to the architecture-standard 0.001
   // if the GGUF was produced by a tool that omitted it. Never trust 1e-5.
@@ -342,43 +370,6 @@ WeightsBundle loadWeights(
     const int64_t epsIdx = gguf_find_key(gguf, "mobilenet.bn_eps");
     if (epsIdx >= 0) {
       bnEps = gguf_get_val_f32(gguf, static_cast<int>(epsIdx));
-    }
-  }
-
-  // Read class labels while we already have the GGUF open; this avoids a
-  // second mmap of the file from ClassificationModel::load.
-  {
-    uint32_t numClasses = kNumClasses;
-    const int64_t idxN = gguf_find_key(gguf, "mobilenet.num_classes");
-    if (idxN >= 0) {
-      numClasses = gguf_get_val_u32(gguf, static_cast<int>(idxN));
-    }
-    // The graph has compile-time fixed FC weights for `kNumClasses` and a
-    // matching `kNumClasses`-element output tensor; a GGUF that advertises
-    // a different class count cannot be served by this build of the
-    // addon. Reject up-front rather than letting downstream
-    // `ggml_backend_tensor_get(..., logits, sizeof(float)*kNumClasses)`
-    // either truncate (numClasses > kNumClasses) or read past the
-    // tensor buffer (numClasses < kNumClasses), and rather than letting
-    // the FC weight upload corrupt the classifier silently due to a
-    // shape mismatch.
-    if (numClasses != kNumClasses) {
-      raiseInvalid(
-          "GGUF metadata 'mobilenet.num_classes' (" +
-          std::to_string(numClasses) +
-          ") does not match the addon's compiled-in class count (" +
-          std::to_string(kNumClasses) +
-          "); rebuild @qvac/classification-ggml against this model or use "
-          "a GGUF with the expected number of classes");
-    }
-    for (uint32_t i = 0; i < numClasses; ++i) {
-      const std::string key = "mobilenet.class_" + std::to_string(i);
-      const int64_t idx = gguf_find_key(gguf, key.c_str());
-      if (idx < 0) {
-        outLabels.clear();
-        break;
-      }
-      outLabels.emplace_back(gguf_get_val_str(gguf, static_cast<int>(idx)));
     }
   }
 
@@ -395,12 +386,18 @@ WeightsBundle loadWeights(
   auto& tensors = bundle.tensors;
 
   // Lazy helpers.
+  auto logTensorLoad = [&](const std::string& tensorName) {
+    std::cout << "[MobileNetGraph] loading tensor: " << tensorName << '\n';
+  };
+
   auto registerTensor = [&](struct ggml_tensor* dst) {
-    tensors.emplace(ggml_get_name(dst), dst);
+    const std::string tensorName = ggml_get_name(dst);
+    logTensorLoad(tensorName);
+    tensors.emplace(tensorName, dst);
   };
 
   auto addConvWeight = [&](const std::string& name) {
-    struct ggml_tensor* t = cloneRaw(bundle.ctx.get(), gguf, ggufCtx, name.c_str());
+    struct ggml_tensor* t = cloneRaw(bundle.ctx.get(), gguf, ggmlCtx, name.c_str());
     registerTensor(t);
   };
 
@@ -409,13 +406,14 @@ WeightsBundle loadWeights(
   auto addSeBiasBroadcast = [&](const std::string& name, int channels) {
     // Raw bias (1D, F16) — used in unit tests.
     struct ggml_tensor* raw =
-        cloneRaw(bundle.ctx.get(), gguf, ggufCtx, name.c_str());
+        cloneRaw(bundle.ctx.get(), gguf, ggmlCtx, name.c_str());
     registerTensor(raw);
 
     // Broadcasted F32 view for graph consumption.
     const int64_t shape4d[4] = {1, 1, channels, 1};
     const std::string brName = name + "_br";
     struct ggml_tensor* br = cloneAsFp32(bundle.ctx.get(), brName.c_str(), 4, shape4d);
+    logTensorLoad(brName);
     tensors.emplace(brName, br);
   };
 
@@ -427,7 +425,9 @@ WeightsBundle loadWeights(
         cloneAsFp32(bundle.ctx.get(), (bnPrefix + ".scale").c_str(), 4, shape4d);
     struct ggml_tensor* shift =
         cloneAsFp32(bundle.ctx.get(), (bnPrefix + ".shift").c_str(), 4, shape4d);
+    logTensorLoad(bnPrefix + ".scale");
     tensors.emplace(bnPrefix + ".scale", scale);
+    logTensorLoad(bnPrefix + ".shift");
     tensors.emplace(bnPrefix + ".shift", shift);
   };
 
@@ -436,11 +436,13 @@ WeightsBundle loadWeights(
   auto addFcWeightFp32 = [&](const std::string& name, int in, int out) {
     const int64_t shape[2] = {in, out};
     struct ggml_tensor* t = cloneAsFp32(bundle.ctx.get(), name.c_str(), 2, shape);
+    logTensorLoad(name);
     tensors.emplace(name, t);
   };
   auto addFcBiasFp32 = [&](const std::string& name, int out) {
     const int64_t shape[1] = {out};
     struct ggml_tensor* t = cloneAsFp32(bundle.ctx.get(), name.c_str(), 1, shape);
+    logTensorLoad(name);
     tensors.emplace(name, t);
   };
 
@@ -449,15 +451,16 @@ WeightsBundle loadWeights(
   addFoldedBn("features.0.1", kStemOutChannels);
 
   // Inverted residual blocks.
+  int featureIndex = 1;
   for (const BlockConfig& cfg : kBlocks) {
-    const std::string base = "features." + std::to_string(cfg.featuresIndex);
-    const bool hasExpand = cfg.expandedChannels != cfg.inputChannels;
+    const std::string base = "features." + std::to_string(featureIndex);
+    const bool hasExpand = cfg.expansionSize != cfg.inputChannels; // true for first layer.
     int dwIdx = 0;
     int seIdx = -1;
     int projIdx = 0;
     if (hasExpand) {
       addConvWeight(base + ".block.0.0.weight");
-      addFoldedBn(base + ".block.0.1", cfg.expandedChannels);
+      addFoldedBn(base + ".block.0.1", cfg.expansionSize);
       dwIdx = 1;
       if (cfg.useSe) {
         seIdx = 2;
@@ -475,24 +478,26 @@ WeightsBundle loadWeights(
     }
     const std::string dwBase = base + ".block." + std::to_string(dwIdx);
     addConvWeight(dwBase + ".0.weight");
-    addFoldedBn(dwBase + ".1", cfg.expandedChannels);
+    addFoldedBn(dwBase + ".1", cfg.expansionSize);
 
     if (cfg.useSe) {
       const std::string seBase = base + ".block." + std::to_string(seIdx);
       addConvWeight(seBase + ".fc1.weight");
       addSeBiasBroadcast(seBase + ".fc1.bias", cfg.seReducedChannels);
       addConvWeight(seBase + ".fc2.weight");
-      addSeBiasBroadcast(seBase + ".fc2.bias", cfg.expandedChannels);
+      addSeBiasBroadcast(seBase + ".fc2.bias", cfg.expansionSize);
     }
 
     const std::string projBase = base + ".block." + std::to_string(projIdx);
     addConvWeight(projBase + ".0.weight");
     addFoldedBn(projBase + ".1", cfg.outputChannels);
+
+    ++featureIndex;
   }
 
-  // Tail: features.12.0 = conv, features.12.1 = BN
-  addConvWeight("features.12.0.weight");
-  addFoldedBn("features.12.1", kTailOutChannels);
+  // Tail: features.16.0 = conv, features.16.1 = BN
+  addConvWeight("features.16.0.weight");
+  addFoldedBn("features.16.1", kTailOutChannels);
 
   // Classifier head.
   addFcWeightFp32("classifier.0.weight", kTailOutChannels, kClassifierHidden);
@@ -517,7 +522,7 @@ WeightsBundle loadWeights(
         name == "classifier.3.bias") {
       continue; // handled in the second pass
     }
-    struct ggml_tensor* src = ggml_get_tensor(ggufCtx, name.c_str());
+    struct ggml_tensor* src = ggml_get_tensor(ggmlCtx, name.c_str());
     if (src == nullptr) {
       raise("Source tensor missing from GGUF: " + name);
     }
@@ -540,13 +545,13 @@ WeightsBundle loadWeights(
 
   auto foldBn = [&](const std::string& bnPrefix) {
     std::vector<float> w =
-        loadVector1d(gguf, ggufCtx, bnPrefix + ".weight");
+        loadVector1d(gguf, ggmlCtx, bnPrefix + ".scale");
     std::vector<float> b =
-        loadVector1d(gguf, ggufCtx, bnPrefix + ".bias");
+        loadVector1d(gguf, ggmlCtx, bnPrefix + ".shift");
     std::vector<float> m =
-        loadVector1d(gguf, ggufCtx, bnPrefix + ".running_mean");
+        loadVector1d(gguf, ggmlCtx, bnPrefix + ".running_mean");
     std::vector<float> v =
-        loadVector1d(gguf, ggufCtx, bnPrefix + ".running_var");
+        loadVector1d(gguf, ggmlCtx, bnPrefix + ".running_var");
     const size_t n = w.size();
     if (b.size() != n || m.size() != n || v.size() != n) {
       raise("BN param size mismatch for " + bnPrefix);
@@ -563,14 +568,15 @@ WeightsBundle loadWeights(
   };
 
   auto foldSeBias = [&](const std::string& biasName) {
-    std::vector<float> b = loadVector1d(gguf, ggufCtx, biasName);
+    std::vector<float> b = loadVector1d(gguf, ggmlCtx, biasName);
     uploadF32(tensors.at(biasName + "_br"), b);
   };
 
   foldBn("features.0.1");
+  int foldFeatureIndex = 1;
   for (const BlockConfig& cfg : kBlocks) {
-    const std::string base = "features." + std::to_string(cfg.featuresIndex);
-    const bool hasExpand = cfg.expandedChannels != cfg.inputChannels;
+    const std::string base = "features." + std::to_string(foldFeatureIndex);
+    const bool hasExpand = cfg.expansionSize != cfg.inputChannels;
     int dwIdx = 0;
     int seIdx = -1;
     int projIdx = 0;
@@ -598,19 +604,20 @@ WeightsBundle loadWeights(
       foldSeBias(seBase + ".fc2.bias");
     }
     foldBn(base + ".block." + std::to_string(projIdx) + ".1");
+    ++foldFeatureIndex;
   }
-  foldBn("features.12.1");
+  foldBn("features.16.1");
 
   // Classifier FC tensors: FP16 -> FP32 upload.
-  auto uploadClassifierTensor = [&](const std::string& name) {
-    std::vector<float> buf =
-        loadVector1d(gguf, ggufCtx, name); // works for any shape (flat count)
-    uploadF32(tensors.at(name), buf);
-  };
-  uploadClassifierTensor("classifier.0.weight");
-  uploadClassifierTensor("classifier.0.bias");
-  uploadClassifierTensor("classifier.3.weight");
-  uploadClassifierTensor("classifier.3.bias");
+  // auto uploadClassifierTensor = [&](const std::string& name) {
+  //   std::vector<float> buf =
+  //       loadVector1d(gguf, ggmlCtx, name); // works for any shape (flat count)
+  //   uploadF32(tensors.at(name), buf);
+  // };
+  // uploadClassifierTensor("classifier.0.weight");
+  // uploadClassifierTensor("classifier.0.bias");
+  // uploadClassifierTensor("classifier.3.weight");
+  // uploadClassifierTensor("classifier.3.bias");
 
   return bundle;
 }
@@ -639,35 +646,48 @@ ComputeGraph buildGraph(const WeightsBundle& weights, ggml_backend_t backend) {
 
   int spatial = kInputHw / 2; // 112 after stem
 
-  // 11 inverted residual blocks.
+  // 15 inverted residual blocks.
+  int graphFeatureIndex = 1;
   for (const BlockConfig& cfg : kBlocks) {
-    x = gb.invertedResidual(x, cfg, spatial);
+    x = gb.invertedResidual(x, cfg, graphFeatureIndex, spatial);
     if (cfg.stride == 2) {
       spatial = (spatial + 1) / 2;
     }
+    switch(graphFeatureIndex)
+    {
+      case 3 :  cg.output_1 = x; break;
+      case 6 :  cg.output_2 = x; break;
+      case 12 : cg.output_3 = x; break;
+    }
+    ++graphFeatureIndex;
   }
 
-  // Tail (features.12): 1x1 conv + BN + HardSwish at 7x7 spatial.
+  // Tail (features.16): 1x1 conv + BN + HardSwish at 7x7 spatial.
   x = gb.convBnAct(
-      x, "features.12.0", "features.12.1", /*stride=*/1, /*kernel=*/1,
+      x, "features.16.0", "features.16.1", /*stride=*/1, /*kernel=*/1,
       /*activate=*/true, /*useHardswish=*/true);
 
   // Classifier: global avg pool → reshape → Linear → HardSwish → Linear.
-  struct ggml_tensor* pooled = ggml_pool_2d(
-      ctx, x, GGML_OP_POOL_AVG, spatial, spatial, spatial, spatial, 0, 0);
-  struct ggml_tensor* flat = ggml_reshape_1d(ctx, pooled, kTailOutChannels);
+  // struct ggml_tensor* pooled = ggml_pool_2d(
+  //     ctx, x, GGML_OP_POOL_AVG, spatial, spatial, spatial, spatial, 0, 0);
+  // struct ggml_tensor* flat = ggml_reshape_1d(ctx, pooled, kTailOutChannels);
 
-  struct ggml_tensor* fc0 = ggml_mul_mat(
-      ctx, gb.t("classifier.0.weight"), flat);
-  fc0 = ggml_add(ctx, fc0, gb.t("classifier.0.bias"));
-  fc0 = ggml_hardswish(ctx, fc0);
+  // struct ggml_tensor* fc0 = ggml_mul_mat(
+  //     ctx, gb.t("classifier.0.weight"), flat);
+  // fc0 = ggml_add(ctx, fc0, gb.t("classifier.0.bias"));
+  // fc0 = ggml_hardswish(ctx, fc0);
 
-  struct ggml_tensor* fc3 = ggml_mul_mat(
-      ctx, gb.t("classifier.3.weight"), fc0);
-  fc3 = ggml_add(ctx, fc3, gb.t("classifier.3.bias"));
+  // struct ggml_tensor* fc3 = ggml_mul_mat(
+  //     ctx, gb.t("classifier.3.weight"), fc0);
+  // fc3 = ggml_add(ctx, fc3, gb.t("classifier.3.bias"));
 
-  cg.output = fc3;
-  ggml_set_name(cg.output, "logits");
+  cg.output_4 = x;
+
+  cg.output_1 = ggml_cont(ctx, cg.output_1);
+  ggml_set_name(cg.output_1, "output_1");
+  // ggml_set_name(cg.output_2, "output_2");
+  // ggml_set_name(cg.output_3, "output_3");
+  // ggml_set_name(cg.output_4, "output_4");
 
   // Defence-in-depth invariant: every site that reads from
   // `cg.output` (warmup pass and per-inference path) does so with a
@@ -679,17 +699,17 @@ ComputeGraph buildGraph(const WeightsBundle& weights, ggml_backend_t backend) {
   // future fine-tune slipping through the GGUF metadata check -- we
   // would silently corrupt the read (truncation or OOB). Catch it
   // here, before any inference runs.
-  if (ggml_nelements(cg.output) != static_cast<int64_t>(kNumClasses)) {
-    raise(
-        "Compute graph output has " +
-        std::to_string(ggml_nelements(cg.output)) +
-        " elements, expected " + std::to_string(kNumClasses) +
-        "; classifier wiring or GGUF weight shapes are inconsistent with "
-        "graph::kNumClasses");
-  }
+  // if (ggml_nelements(cg.output) != static_cast<int64_t>(kNumClasses)) {
+  //   raise(
+  //       "Compute graph output has " +
+  //       std::to_string(ggml_nelements(cg.output)) +
+  //       " elements, expected " + std::to_string(kNumClasses) +
+  //       "; classifier wiring or GGUF weight shapes are inconsistent with "
+  //       "graph::kNumClasses");
+  // }
 
   cg.graph = ggml_new_graph_custom(ctx, 8192, /*grads=*/false);
-  ggml_build_forward_expand(cg.graph, cg.output);
+  ggml_build_forward_expand(cg.graph, cg.output_1);
 
   cg.backendBuffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
   if (cg.backendBuffer == nullptr) {

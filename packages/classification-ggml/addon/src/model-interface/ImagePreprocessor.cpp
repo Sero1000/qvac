@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -166,18 +167,68 @@ void validateRawRgb(
         " (expected " + std::to_string(expected) + " bytes)");
   }
 }
-
 std::vector<uint8_t> resizeToInput(
     std::span<const uint8_t> srcRgb, uint32_t srcWidth, uint32_t srcHeight) {
-  std::vector<uint8_t> out(kInputSize * kInputSize * kChannels);
-  unsigned char* ok = stbir_resize_uint8_linear(
-      srcRgb.data(), static_cast<int>(srcWidth), static_cast<int>(srcHeight),
-      static_cast<int>(srcWidth * kChannels), out.data(),
-      static_cast<int>(kInputSize), static_cast<int>(kInputSize),
-      static_cast<int>(kInputSize * kChannels), STBIR_RGB);
-  if (ok == nullptr) {
-    raise("Failed to resize image to 224x224");
+  auto resizeRgb = [](
+                       std::span<const uint8_t> src, uint32_t inWidth,
+                       uint32_t inHeight, uint32_t outWidth,
+                       uint32_t outHeight) -> std::vector<uint8_t> {
+    std::vector<uint8_t> resized(
+        static_cast<size_t>(outWidth) * outHeight * kChannels);
+    unsigned char* ok = stbir_resize_uint8_linear(
+        src.data(), static_cast<int>(inWidth), static_cast<int>(inHeight),
+        static_cast<int>(inWidth * kChannels), resized.data(),
+        static_cast<int>(outWidth), static_cast<int>(outHeight),
+        static_cast<int>(outWidth * kChannels), STBIR_RGB);
+    if (ok == nullptr) {
+      raise("Failed to resize image to target resolution");
+    }
+    return resized;
+  };
+
+  // Match doctr detection defaults:
+  // - preserve_aspect_ratio=True
+  // - symmetric_pad=True
+  uint32_t resizedWidth = kInputSize;
+  uint32_t resizedHeight = kInputSize;
+  if (srcWidth == 0 || srcHeight == 0) {
+    raise("Input image has invalid dimensions");
   }
+  if (srcHeight > srcWidth) {
+    resizedWidth =
+        std::max(static_cast<uint32_t>((kInputSize * srcWidth) / srcHeight), 1U);
+    resizedHeight = kInputSize;
+  } else if (srcWidth > srcHeight) {
+    resizedHeight =
+        std::max(static_cast<uint32_t>((kInputSize * srcHeight) / srcWidth), 1U);
+    resizedWidth = kInputSize;
+  }
+
+  std::vector<uint8_t> resized =
+      resizeRgb(srcRgb, srcWidth, srcHeight, resizedWidth, resizedHeight);
+  if (resizedWidth == kInputSize && resizedHeight == kInputSize) {
+    return resized;
+  }
+
+  std::vector<uint8_t> out(
+      static_cast<size_t>(kInputSize) * kInputSize * kChannels, 0);
+  const uint32_t padX = kInputSize - resizedWidth;
+  const uint32_t padY = kInputSize - resizedHeight;
+  const uint32_t leftPad = (padX + 1) / 2;
+  const uint32_t topPad = (padY + 1) / 2;
+
+  for (uint32_t y = 0; y < resizedHeight; ++y) {
+    const size_t srcRow =
+        static_cast<size_t>(y) * resizedWidth * kChannels;
+    const size_t dstRow =
+        (static_cast<size_t>(y + topPad) * kInputSize + leftPad) * kChannels;
+    std::copy(
+        resized.begin() + static_cast<std::ptrdiff_t>(srcRow),
+        resized.begin() +
+            static_cast<std::ptrdiff_t>(srcRow + static_cast<size_t>(resizedWidth) * kChannels),
+        out.begin() + static_cast<std::ptrdiff_t>(dstRow));
+  }
+
   return out;
 }
 
@@ -187,6 +238,9 @@ std::vector<float> normalizeToWhcn(std::span<const uint8_t> rgb224) {
     raise("Internal error: resized buffer does not have expected size");
   }
   constexpr float kUnit = 1.0F / 255.0F;
+  // Match doctr detection model defaults (detection/zoo.py).
+  constexpr std::array<float, 3> kDoctrDetectionMean = {0.798F, 0.785F, 0.772F};
+  constexpr std::array<float, 3> kDoctrDetectionStd = {0.264F, 0.2749F, 0.287F};
 
   // WHCN layout = ggml 4D order (width, height, channels, batch). For a
   // contiguous 4D tensor, the fastest-varying axis is width. In index math:
@@ -202,7 +256,7 @@ std::vector<float> normalizeToWhcn(std::span<const uint8_t> rgb224) {
       for (uint32_t c = 0; c < kChannels; ++c) {
         const float pixel = static_cast<float>(rgb224[srcIdx + c]) * kUnit;
         out[c * plane + dstBase] =
-            (pixel - kImageNetMean[c]) / kImageNetStd[c];
+            (pixel - kDoctrDetectionMean[c]) / kDoctrDetectionStd[c];
       }
     }
   }

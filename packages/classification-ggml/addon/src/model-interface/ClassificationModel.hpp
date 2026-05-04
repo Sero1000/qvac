@@ -55,6 +55,10 @@ struct ClassifyResult {
 /// sorted by confidence descending.
 struct ClassifyOutput {
   std::vector<ClassifyResult> results;
+  std::vector<float> data_1;
+  std::vector<float> data_2;
+  std::vector<float> data_3;
+  std::vector<float> data_4;
 };
 
 /// MobileNetV3-Small 3-class image classification model backed by libggml's

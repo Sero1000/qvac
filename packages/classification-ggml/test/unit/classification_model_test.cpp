@@ -53,7 +53,7 @@ TEST(MobileNetGraphTest, ArchitectureMatches34ConvAnd2Linear) {
   int totalConvs = 1 /*stem*/ + 1 /*tail*/;
   int totalSeBlocks = 0;
   for (const qgraph::BlockConfig& b : qgraph::kBlocks) {
-    const bool hasExpand = b.expandedChannels != b.inputChannels;
+    const bool hasExpand = b.expansionSize != b.inputChannels;
     // expand + depthwise + project
     totalConvs += (hasExpand ? 1 : 0) + 1 + 1;
     if (b.useSe) ++totalSeBlocks;

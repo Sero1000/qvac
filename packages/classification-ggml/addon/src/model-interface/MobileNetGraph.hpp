@@ -12,44 +12,44 @@
 
 namespace qvac_lib_infer_ggml_classification::graph {
 
-/// Per-block hyperparameters for one torchvision MobileNetV3-Small
-/// `InvertedResidual` layer, reconstructed from the bundled GGUF weights so
-/// the C++ graph matches the ONNX reference line-for-line.
+/// Per-block hyperparameters for one torchvision MobileNetV3-Large
+/// `InvertedResidual` layer.
 struct BlockConfig {
-  int featuresIndex;   // 1..11 (matches `features.N` in the GGUF)
   int inputChannels;
-  int expandedChannels;
   int outputChannels;
-  int depthwiseKernel; // 3 or 5
-  int stride;          // 1 or 2
-  bool useHardswish;   // false = ReLU, true = HardSwish
+  int kernelSize;
+  int expansionSize;
   bool useSe;          // squeeze-and-excite after the depthwise conv
+  bool useHardswish;   // false = ReLU, true = HardSwish
+  int stride;          // 1 or 2
+  int padding;
+  int depthwiseKernel; // 3 or 5
   int seReducedChannels;
 };
 
-/// Static MobileNetV3-Small configuration. Matches `torchvision.models
-/// .mobilenet_v3_small` with the 3-class classifier head used by the bundled
-/// GGUF weights. Kept here as a named constant table so reviewers can check
-/// it against the published architecture without chasing magic numbers.
-inline constexpr int kNumBlocks = 11;
-inline constexpr std::array<BlockConfig, kNumBlocks> kBlocks = {{
-    // idx  inC  expC  outC  k  s  hs     se     seR
-    {1, 16, 16, 16, 3, 2, false, true, 8},
-    {2, 16, 72, 24, 3, 2, false, false, 0},
-    {3, 24, 88, 24, 3, 1, false, false, 0},
-    {4, 24, 96, 40, 5, 2, true, true, 24},
-    {5, 40, 240, 40, 5, 1, true, true, 64},
-    {6, 40, 240, 40, 5, 1, true, true, 64},
-    {7, 40, 120, 48, 5, 1, true, true, 32},
-    {8, 48, 144, 48, 5, 1, true, true, 40},
-    {9, 48, 288, 96, 5, 2, true, true, 72},
-    {10, 96, 576, 96, 5, 1, true, true, 144},
-    {11, 96, 576, 96, 5, 1, true, true, 144},
+inline constexpr int kNumBlocks = 15;
+inline constexpr std::array<BlockConfig, kNumBlocks> kBlocks =
+{{
+  { .inputChannels=16,  .outputChannels=16,  .kernelSize=3, .expansionSize=16,  .useSe=false, .useHardswish=false, .stride=1, .padding=1, .depthwiseKernel=3, .seReducedChannels=0},
+  { .inputChannels=16,  .outputChannels=24,  .kernelSize=3, .expansionSize=64,  .useSe=false, .useHardswish=false, .stride=2, .padding=1, .depthwiseKernel=3, .seReducedChannels=0},
+  { .inputChannels=24,  .outputChannels=24,  .kernelSize=3, .expansionSize=72,  .useSe=false, .useHardswish=false, .stride=1, .padding=1, .depthwiseKernel=3, .seReducedChannels=0},
+  { .inputChannels=24,  .outputChannels=40,  .kernelSize=5, .expansionSize=72,  .useSe=true,  .useHardswish=false, .stride=2, .padding=2, .depthwiseKernel=5, .seReducedChannels=24},
+  { .inputChannels=40,  .outputChannels=40,  .kernelSize=5, .expansionSize=120, .useSe=true,  .useHardswish=false, .stride=1, .padding=2, .depthwiseKernel=5, .seReducedChannels=32},
+  { .inputChannels=40,  .outputChannels=40,  .kernelSize=5, .expansionSize=120, .useSe=true,  .useHardswish=false, .stride=1, .padding=2, .depthwiseKernel=5, .seReducedChannels=32},
+  { .inputChannels=40,  .outputChannels=80,  .kernelSize=3, .expansionSize=240, .useSe=false, .useHardswish=true, .stride=2, .padding=1, .depthwiseKernel=3, .seReducedChannels=0},
+  { .inputChannels=80,  .outputChannels=80,  .kernelSize=3, .expansionSize=200, .useSe=false, .useHardswish=true, .stride=1, .padding=1, .depthwiseKernel=3, .seReducedChannels=0},
+  { .inputChannels=80,  .outputChannels=80,  .kernelSize=3, .expansionSize=184, .useSe=false, .useHardswish=true, .stride=1, .padding=1, .depthwiseKernel=3, .seReducedChannels=0},
+  { .inputChannels=80,  .outputChannels=80,  .kernelSize=3, .expansionSize=184, .useSe=false, .useHardswish=true, .stride=1, .padding=1, .depthwiseKernel=3, .seReducedChannels=0},
+  { .inputChannels=80,  .outputChannels=112, .kernelSize=3, .expansionSize=480, .useSe=true,  .useHardswish=true, .stride=1, .padding=1, .depthwiseKernel=3, .seReducedChannels=120},
+  { .inputChannels=112, .outputChannels=112, .kernelSize=3, .expansionSize=672, .useSe=true,  .useHardswish=true, .stride=1, .padding=1, .depthwiseKernel=3, .seReducedChannels=168},
+  { .inputChannels=112, .outputChannels=160, .kernelSize=5, .expansionSize=672, .useSe=true,  .useHardswish=true, .stride=2, .padding=2, .depthwiseKernel=5, .seReducedChannels=168},
+  { .inputChannels=160, .outputChannels=160, .kernelSize=5, .expansionSize=960, .useSe=true,  .useHardswish=true, .stride=1, .padding=2, .depthwiseKernel=5, .seReducedChannels=240},
+  { .inputChannels=160, .outputChannels=160, .kernelSize=5, .expansionSize=960, .useSe=true,  .useHardswish=true, .stride=1, .padding=2, .depthwiseKernel=5, .seReducedChannels=240}
 }};
 
 inline constexpr int kStemOutChannels = 16;
-inline constexpr int kTailOutChannels = 576;
-inline constexpr int kClassifierHidden = 1024;
+inline constexpr int kTailOutChannels = 960;
+inline constexpr int kClassifierHidden = 1280;
 inline constexpr int kNumClasses = 3;
 inline constexpr float kBatchNormEpsilon = 0.001F;
 inline constexpr int kInputHw = 224;
@@ -81,7 +81,10 @@ struct ComputeGraph {
       nullptr, ggml_free};
   struct ggml_cgraph* graph = nullptr;
   struct ggml_tensor* input = nullptr;
-  struct ggml_tensor* output = nullptr;
+  struct ggml_tensor* output_1 = nullptr;
+  struct ggml_tensor* output_2 = nullptr;
+  struct ggml_tensor* output_3 = nullptr;
+  struct ggml_tensor* output_4 = nullptr;
   ggml_backend_buffer_t backendBuffer = nullptr;
 
   ComputeGraph() = default;
@@ -103,7 +106,7 @@ WeightsBundle loadWeights(
     const std::string& ggufPath, ggml_backend_t backend,
     std::vector<std::string>& outLabels);
 
-/// Builds the forward compute graph for MobileNetV3-Small using the weights
+/// Builds the forward compute graph for MobileNetV3-Large using the weights
 /// bundle. The returned ComputeGraph holds its own ggml_context (graph only,
 /// not weights) and a pre-allocated input/output buffer on `backend`.
 ///

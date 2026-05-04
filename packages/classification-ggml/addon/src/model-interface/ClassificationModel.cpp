@@ -195,7 +195,7 @@ void ClassificationModel::load() {
     // materialises after the first tensor_get on the output buffer.
     float warmupLogits[graph::kNumClasses] = {0.0F};
     ggml_backend_tensor_get(
-        compute_.output, warmupLogits, 0, sizeof(warmupLogits));
+        compute_.output_4, warmupLogits, 0, sizeof(warmupLogits));
     (void)warmupLogits;
   }
 
@@ -235,6 +235,7 @@ std::any ClassificationModel::process(const std::any& input) {
       std::span<const uint8_t>(inPtr->data.data(), inPtr->data.size()),
       rawW, rawH, rawC);
 
+
   const size_t expected = static_cast<size_t>(preprocess::kInputSize) *
                           preprocess::kInputSize * preprocess::kChannels;
   if (inputTensor.size() != expected) {
@@ -261,22 +262,33 @@ std::any ClassificationModel::process(const std::any& input) {
   }
 
   // Retrieve logits.
-  float logits[graph::kNumClasses] = {0.0F};
+  ClassifyOutput output;
+  // float logits[graph::kNumClasses] = {0.0F};
+  output.data_1.resize(ggml_nelements(compute_.output_1));
+  // output.data_2.resize(ggml_nelements(compute_.output_2));
+  // output.data_3.resize(ggml_nelements(compute_.output_3));
+  // output.data_4.resize(ggml_nelements(compute_.output_4));
   ggml_backend_tensor_get(
-      compute_.output, logits, 0, sizeof(logits));
+      compute_.output_1, output.data_1.data(), 0, ggml_nbytes(compute_.output_1));
+  // ggml_backend_tensor_get(
+  //     compute_.output_2, output.data_2.data(), 0, ggml_nbytes(compute_.output_2));
+  // ggml_backend_tensor_get(
+  //     compute_.output_3, output.data_3.data(), 0, ggml_nbytes(compute_.output_3));
+  // ggml_backend_tensor_get(
+  //     compute_.output_4, output.data_4.data(), 0, ggml_nbytes(compute_.output_4));
 
-  std::vector<float> probs = softmax(std::span<const float>(logits, graph::kNumClasses));
+  // std::vector<float> probs = softmax(std::span<const float>(logits, graph::kNumClasses));
 
   // Build sorted result list. Use labels parsed from GGUF metadata (or the
   // hardcoded fallback) so caller receives human-readable names.
-  ClassifyOutput output;
-  output.results.reserve(probs.size());
-  for (size_t i = 0; i < probs.size(); ++i) {
-    const std::string label = i < labels_.size()
-                                  ? labels_[i]
-                                  : std::string("class_") + std::to_string(i);
-    output.results.push_back({label, probs[i]});
-  }
+  // ClassifyOutput output;
+  // output.results.reserve(probs.size());
+  // for (size_t i = 0; i < probs.size(); ++i) {
+  //   const std::string label = i < labels_.size()
+  //                                 ? labels_[i]
+  //                                 : std::string("class_") + std::to_string(i);
+  //   output.results.push_back({label, probs[i]});
+  // }
 
   // Sort descending by confidence, with explicit handling of non-finite
   // values (NaN/Inf): treat them as smaller than any finite value so
@@ -285,61 +297,61 @@ std::any ClassificationModel::process(const std::any& input) {
   // probabilities, but we keep the guard so a future upstream bug or
   // numerical edge case in the ggml CPU backend cannot break sort and
   // silently land a non-maximum-confidence class at index 0.
-  std::sort(
-      output.results.begin(),
-      output.results.end(),
-      [](const ClassifyResult& a, const ClassifyResult& b) {
-        const bool aFinite = std::isfinite(a.confidence);
-        const bool bFinite = std::isfinite(b.confidence);
-        if (aFinite != bFinite) {
-          return aFinite;
-        }
-        if (!aFinite && !bFinite) {
-          return false;
-        }
-        return a.confidence > b.confidence;
-      });
+  // std::sort(
+  //     output_vec.results.begin(),
+  //     output_vec.results.end(),
+  //     [](const ClassifyResult& a, const ClassifyResult& b) {
+  //       const bool aFinite = std::isfinite(a.confidence);
+  //       const bool bFinite = std::isfinite(b.confidence);
+  //       if (aFinite != bFinite) {
+  //         return aFinite;
+  //       }
+  //       if (!aFinite && !bFinite) {
+  //         return false;
+  //       }
+  //       return a.confidence > b.confidence;
+  //     });
 
   // Optional per-inference trace. Off unless QVAC_CLASSIFICATION_TRACE=1
   // in the environment. Designed to give us actionable data for
   // platform-specific numerical issues (e.g. win32 CI meal_1 anomaly)
   // without requiring any rebuild or workflow change -- a test job
   // can simply set the env var to get the full picture.
-  if (traceEnabled()) {
-    std::fprintf(
-        stderr,
-        "[qvac-classify] logits=[%.6f, %.6f, %.6f] "
-        "probs_before_sort=[%.6f, %.6f, %.6f] "
-        "sorted=[{%s:%.6f}, {%s:%.6f}, {%s:%.6f}]\n",
-        static_cast<double>(logits[0]),
-        static_cast<double>(logits[1]),
-        static_cast<double>(logits[2]),
-        static_cast<double>(probs[0]),
-        static_cast<double>(probs[1]),
-        static_cast<double>(probs[2]),
-        output.results.size() > 0 ? output.results[0].label.c_str() : "-",
-        output.results.size() > 0
-            ? static_cast<double>(output.results[0].confidence)
-            : 0.0,
-        output.results.size() > 1 ? output.results[1].label.c_str() : "-",
-        output.results.size() > 1
-            ? static_cast<double>(output.results[1].confidence)
-            : 0.0,
-        output.results.size() > 2 ? output.results[2].label.c_str() : "-",
-        output.results.size() > 2
-            ? static_cast<double>(output.results[2].confidence)
-            : 0.0);
-    std::fflush(stderr);
-  }
+  // if (traceEnabled()) {
+  //   std::fprintf(
+  //       stderr,
+  //       "[qvac-classify] logits=[%.6f, %.6f, %.6f] "
+  //       "probs_before_sort=[%.6f, %.6f, %.6f] "
+  //       "sorted=[{%s:%.6f}, {%s:%.6f}, {%s:%.6f}]\n",
+  //       static_cast<double>(logits[0]),
+  //       static_cast<double>(logits[1]),
+  //       static_cast<double>(logits[2]),
+  //       static_cast<double>(probs[0]),
+  //       static_cast<double>(probs[1]),
+  //       static_cast<double>(probs[2]),
+  //       output.results.size() > 0 ? output.results[0].label.c_str() : "-",
+  //       output.results.size() > 0
+  //           ? static_cast<double>(output.results[0].confidence)
+  //           : 0.0,
+  //       output.results.size() > 1 ? output.results[1].label.c_str() : "-",
+  //       output.results.size() > 1
+  //           ? static_cast<double>(output.results[1].confidence)
+  //           : 0.0,
+  //       output.results.size() > 2 ? output.results[2].label.c_str() : "-",
+  //       output.results.size() > 2
+  //           ? static_cast<double>(output.results[2].confidence)
+  //           : 0.0);
+  //   std::fflush(stderr);
+  // }
 
   // Apply topK filter if requested and within bounds.
-  if (inPtr->topK > 0 && inPtr->topK < output.results.size()) {
-    output.results.resize(inPtr->topK);
-  }
+  // if (inPtr->topK > 0 && inPtr->topK < output_vec.results.size()) {
+  //   output_vec.results.resize(inPtr->topK);
+  // }
 
-  const auto t1 = std::chrono::steady_clock::now();
-  lastInferenceUs_ = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+  // const auto t1 = std::chrono::steady_clock::now();
+  // lastInferenceUs_ = static_cast<uint64_t>(
+  //     std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
 
   return std::any(std::move(output));
 }

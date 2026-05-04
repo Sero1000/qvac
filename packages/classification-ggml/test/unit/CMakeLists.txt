@@ -42,6 +42,45 @@ target_link_libraries(
     GTest::gtest_main
 )
 
+set(LOAD_APP_SOURCES
+  load_model_app.cpp
+  ${CMAKE_SOURCE_DIR}/addon/src/model-interface/ClassificationModel.cpp
+  ${CMAKE_SOURCE_DIR}/addon/src/model-interface/ImagePreprocessor.cpp
+  ${CMAKE_SOURCE_DIR}/addon/src/model-interface/MobileNetGraph.cpp
+)
+
+add_executable(classification-load-model-app ${LOAD_APP_SOURCES})
+target_compile_features(classification-load-model-app PRIVATE cxx_std_20)
+target_compile_options(classification-load-model-app PRIVATE -Wall -Wextra -Wfatal-errors -g)
+
+if(NOT WIN32)
+  target_compile_options(classification-load-model-app PRIVATE -fno-omit-frame-pointer)
+endif()
+
+target_include_directories(
+  classification-load-model-app
+  PRIVATE
+  ${CMAKE_SOURCE_DIR}/addon/src
+  ${QVAC_LIB_INFERENCE_ADDON_CPP_INCLUDE_DIRS}
+  ${STB_INCLUDE_DIRS}
+)
+
+target_link_libraries(
+  classification-load-model-app
+  PRIVATE
+    ggml::ggml
+    ggml::ggml-base
+    ggml::ggml-cpu
+)
+
+if(NOT WIN32)
+  target_link_libraries(classification-load-model-app PRIVATE -fsanitize=address)
+endif()
+
+if(WIN32)
+  target_link_libraries(classification-load-model-app PRIVATE msvcrt.lib)
+endif()
+
 if(ENABLE_COVERAGE)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(addon-test PRIVATE -fprofile-instr-generate -fcoverage-mapping)
