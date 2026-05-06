@@ -18,6 +18,22 @@
 
 namespace qvac_lib_infer_ggml_classification::preprocess {
 
+template<typename T>
+void printLast(const std::vector<T>& data, size_t count)
+{
+  std::cout<<"\n[ ";
+  const size_t start = data.size() > count ? data.size() - count : 0;
+  for (size_t i = start; i < data.size(); ++i) {
+    std::cout << static_cast<double>(data[i]) << ", ";
+  }
+  // for(size_t i = 0; i < count;++i)
+  // {
+  //   std::cout<<(float)data[i]<<", ";
+  // }
+  std::cout<<" ]";
+  std::cout.flush();
+}
+
 namespace {
 using qvac_errors::general_error::InvalidArgument;
 using qvac_errors::StatusError;
@@ -289,7 +305,9 @@ std::vector<float> preprocessToTensor(
   }
 
   std::vector<uint8_t> resized = resizeToInput(rgb, width, height);
-  return normalizeToWhcn(resized);
+  auto output =  normalizeToWhcn(resized);
+
+  return output;
 }
 
 } // namespace qvac_lib_infer_ggml_classification::preprocess

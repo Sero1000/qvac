@@ -250,8 +250,8 @@ inline js_value_t* runJob(js_env_t* env, js_callback_info_t* info) try {
           "bytes; got " + std::to_string(c));
     }
     cppInput.rawRgb = RawRgbDims{
-        static_cast<uint32_t>(w), static_cast<uint32_t>(h),
-        static_cast<uint32_t>(c)};
+        .width=static_cast<uint32_t>(w), .height=static_cast<uint32_t>(h),
+        .channels=static_cast<uint32_t>(c)};
   }
 
   auto topKOpt = inputObj.getOptionalProperty<jsu::Number>(env, "topK");

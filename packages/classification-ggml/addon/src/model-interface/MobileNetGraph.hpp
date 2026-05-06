@@ -52,7 +52,7 @@ inline constexpr int kTailOutChannels = 960;
 inline constexpr int kClassifierHidden = 1280;
 inline constexpr int kNumClasses = 3;
 inline constexpr float kBatchNormEpsilon = 0.001F;
-inline constexpr int kInputHw = 224;
+inline constexpr int kInputHw = 1024;
 
 /// Owned bundle: a ggml context holding every weight tensor, plus a map from
 /// GGUF tensor name to the live tensor handle. Created once at model load and

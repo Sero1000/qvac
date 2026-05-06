@@ -7,12 +7,12 @@
 
 namespace qvac_lib_infer_ggml_classification::preprocess {
 
-constexpr uint32_t kInputSize = 224;
+constexpr uint32_t kInputSize = 1024;
 constexpr uint32_t kChannels = 3;
 /// Reject unreasonably large images to defend against OOM-shaped inputs.
 constexpr uint32_t kMaxImageDimension = 16384;
 
-/// ImageNet per-channel normalization parameters used by MobileNetV3.
+/// ImageNet per-channel normalization parameters used by classification models.
 constexpr std::array<float, 3> kImageNetMean = {0.485F, 0.456F, 0.406F};
 constexpr std::array<float, 3> kImageNetStd = {0.229F, 0.224F, 0.225F};
 

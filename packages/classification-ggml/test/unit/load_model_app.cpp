@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <iomanip>
 #include <string>
 #include <vector>
 
@@ -15,16 +16,32 @@ void printFirst(const std::vector<T>& data, size_t count)
   std::cout<<"[ ";
   for(size_t i = 0; i < count;++i)
   {
-    std::cout<<(float)data[i]<<", ";
+    std::cout<<std::defaultfloat<<(float)data[i]<<", ";
   }
   std::cout<<" ]";
   std::cout.flush();
 }
 
+template<typename T>
+void printLast(const std::vector<T>& data, size_t count)
+{
+  std::cout<<"\n[ ";
+  const size_t start = data.size() > count ? data.size() - count : 0;
+  for (size_t i = start; i < data.size(); ++i) {
+    std::cout << std::defaultfloat <<static_cast<float>(data[i]) << ", ";
+  }
+  // for(size_t i = 0; i < count;++i)
+  // {
+  //   std::cout<<(float)data[i]<<", ";
+  // }
+  std::cout<<" ]";
+  std::cout.flush();
+}
 
 int main() {
   // constexpr const char* kModelPath = "weights/mobilenetv3_3class_v3_fp16.gguf";
-  constexpr const char* kModelPath = "weights/db_mobilenet_v3_large.gguf";
+  // constexpr const char* kModelPath = "weights/db_mobilenet_v3_large.gguf";
+  constexpr const char* kModelPath = "weights/db_mobilenet_v3_large_f32.gguf";
   constexpr const char* kImagePath = "test_image.png";
 
   try {
@@ -57,20 +74,10 @@ int main() {
       std::cerr << "Model returned unexpected output type\n";
       return 1;
     }
-    if (output->data_1.empty()) {
-      std::cerr << "Model returned no data.";
-      return 1;
-    }
 
     std::cout << "Backbone Inference succeeded for image: " << kImagePath << '\n';
-    std::cout<<"Output_1 :\n [ ";
-    for(int i = 0; i < 20; ++i)
-    {
-      std::cout<<output->data_1[i]<<", ";
-    }
-    
-    std::cout<<" ]"<<'\n';
-    std::cout.flush();
+    printFirst(output->data_4, 20);
+    printLast(output->data_4, 20);
 
     // std::cout<<"Output_2 :\n [ ";
     // for(int i = 0; i < 20; ++i)

@@ -173,31 +173,31 @@ void ClassificationModel::load() {
   // every backend buffer in a fully-written, deterministic state and to
   // exercise every lazy-init code path before any caller sees the
   // model. Cost: one synthetic inference at load() time.
-  {
-    constexpr uint32_t kWarmupSide = 32;  // resized to kInputSize
-    std::vector<uint8_t> warmupRgb(
-        static_cast<size_t>(kWarmupSide) * kWarmupSide * preprocess::kChannels);
-    for (size_t i = 0; i < warmupRgb.size(); ++i) {
-      warmupRgb[i] = static_cast<uint8_t>((i * 7) & 0xFFU);
-    }
-    std::vector<float> warmupTensor = preprocess::preprocessToTensor(
-        std::span<const uint8_t>(warmupRgb.data(), warmupRgb.size()),
-        kWarmupSide, kWarmupSide, preprocess::kChannels);
-    ggml_backend_tensor_set(
-        compute_.input, warmupTensor.data(), 0,
-        warmupTensor.size() * sizeof(float));
-    if (numThreads_ > 0) {
-      ggml_backend_cpu_set_n_threads(backend_, numThreads_);
-    }
-    (void)ggml_backend_graph_compute(backend_, compute_.graph);
-    // Read the output back so the warmup is observably symmetric with
-    // process(): on some backends the result of compute() only fully
-    // materialises after the first tensor_get on the output buffer.
-    float warmupLogits[graph::kNumClasses] = {0.0F};
-    ggml_backend_tensor_get(
-        compute_.output_4, warmupLogits, 0, sizeof(warmupLogits));
-    (void)warmupLogits;
-  }
+  // {
+  //   constexpr uint32_t kWarmupSide = 32;  // resized to kInputSize
+  //   std::vector<uint8_t> warmupRgb(
+  //       static_cast<size_t>(kWarmupSide) * kWarmupSide * preprocess::kChannels);
+  //   for (size_t i = 0; i < warmupRgb.size(); ++i) {
+  //     warmupRgb[i] = static_cast<uint8_t>((i * 7) & 0xFFU);
+  //   }
+  //   std::vector<float> warmupTensor = preprocess::preprocessToTensor(
+  //       std::span<const uint8_t>(warmupRgb.data(), warmupRgb.size()),
+  //       kWarmupSide, kWarmupSide, preprocess::kChannels);
+  //   ggml_backend_tensor_set(
+  //       compute_.input, warmupTensor.data(), 0,
+  //       warmupTensor.size() * sizeof(float));
+  //   if (numThreads_ > 0) {
+  //     ggml_backend_cpu_set_n_threads(backend_, numThreads_);
+  //   }
+  //   (void)ggml_backend_graph_compute(backend_, compute_.graph);
+  //   // Read the output back so the warmup is observably symmetric with
+  //   // process(): on some backends the result of compute() only fully
+  //   // materialises after the first tensor_get on the output buffer.
+  //   float warmupLogits[graph::kNumClasses] = {0.0F};
+  //   ggml_backend_tensor_get(
+  //       compute_.output_1, warmupLogits, 0, sizeof(warmupLogits));
+  //   (void)warmupLogits;
+  // }
 
   loaded_ = true;
 
@@ -264,18 +264,18 @@ std::any ClassificationModel::process(const std::any& input) {
   // Retrieve logits.
   ClassifyOutput output;
   // float logits[graph::kNumClasses] = {0.0F};
-  output.data_1.resize(ggml_nelements(compute_.output_1));
+  // output.data_1.resize(ggml_nelements(compute_.output_1));
   // output.data_2.resize(ggml_nelements(compute_.output_2));
   // output.data_3.resize(ggml_nelements(compute_.output_3));
-  // output.data_4.resize(ggml_nelements(compute_.output_4));
+  output.data_4.resize(ggml_nelements(compute_.output_4));
+  //ggml_backend_tensor_get(
+  //   compute_.output_1, output.data_1.data(), 0, ggml_nbytes(compute_.output_1));
+  // ggml_backend_tensor_get(
+  //    compute_.output_2, output.data_2.data(), 0, ggml_nbytes(compute_.output_2));
+  // ggml_backend_tensor_get(
+  //    compute_.output_3, output.data_3.data(), 0, ggml_nbytes(compute_.output_3));
   ggml_backend_tensor_get(
-      compute_.output_1, output.data_1.data(), 0, ggml_nbytes(compute_.output_1));
-  // ggml_backend_tensor_get(
-  //     compute_.output_2, output.data_2.data(), 0, ggml_nbytes(compute_.output_2));
-  // ggml_backend_tensor_get(
-  //     compute_.output_3, output.data_3.data(), 0, ggml_nbytes(compute_.output_3));
-  // ggml_backend_tensor_get(
-  //     compute_.output_4, output.data_4.data(), 0, ggml_nbytes(compute_.output_4));
+      compute_.output_4, output.data_4.data(), 0, ggml_nbytes(compute_.output_4));
 
   // std::vector<float> probs = softmax(std::span<const float>(logits, graph::kNumClasses));
 
