@@ -67,6 +67,31 @@ void ClassificationModel::setNumThreads(int threads) {
   numThreads_ = threads;
 }
 
+ClassifyOutput ClassificationModel::runTensor(std::span<const float> inputTensor) {
+  ggml_backend_tensor_set(
+      compute_.input, inputTensor.data(), 0,
+      inputTensor.size() * sizeof(float));
+
+  if (numThreads_ > 0) {
+    ggml_backend_cpu_set_n_threads(backend_, numThreads_);
+  }
+
+  ggml_status status =
+      ggml_backend_graph_compute(backend_, compute_.graph);
+  if (status != GGML_STATUS_SUCCESS) {
+    throw StatusError(
+        InternalError, "ggml_backend_graph_compute failed with status " +
+                           std::to_string(static_cast<int>(status)));
+  }
+
+  ClassifyOutput output;
+  output.data_4.resize(ggml_nelements(compute_.output_4));
+  ggml_backend_tensor_get(
+      compute_.output_4, output.data_4.data(), 0, ggml_nbytes(compute_.output_4));
+
+  return output;
+}
+
 namespace {
 
 /// Numerically stable softmax over a short logits vector. Defensive
@@ -155,56 +180,7 @@ void ClassificationModel::load() {
   }
   compute_ = graph::buildGraph(weights_, backend_);
 
-  // Cold-inference warmup. The first user-visible classify() can observe
-  // non-finite logits on some platforms (notably win32-x64 in CI:
-  // meal_1.jpg -> NaN in result[0].confidence) because:
-  //   - ggml's backend graph allocator leaves intermediate buffers
-  //     uninitialised after buildGraph().
-  //   - Some CPU backends lazily JIT or page in SIMD kernels on the
-  //     first non-trivial input, and the cold path can interact badly
-  //     with FP state (FTZ/denormals) left from earlier process work.
-  //
-  // To eliminate this deterministically, run one full forward pass
-  // through the EXACT same pipeline classify() uses: synthesise a small
-  // raw-RGB buffer with a deterministic non-zero gradient, push it
-  // through preprocess::preprocessToTensor (resize + ImageNet
-  // normalise), set the input tensor, compute the graph, and read the
-  // output back. The warmup output is discarded; the goal is to leave
-  // every backend buffer in a fully-written, deterministic state and to
-  // exercise every lazy-init code path before any caller sees the
-  // model. Cost: one synthetic inference at load() time.
-  // {
-  //   constexpr uint32_t kWarmupSide = 32;  // resized to kInputSize
-  //   std::vector<uint8_t> warmupRgb(
-  //       static_cast<size_t>(kWarmupSide) * kWarmupSide * preprocess::kChannels);
-  //   for (size_t i = 0; i < warmupRgb.size(); ++i) {
-  //     warmupRgb[i] = static_cast<uint8_t>((i * 7) & 0xFFU);
-  //   }
-  //   std::vector<float> warmupTensor = preprocess::preprocessToTensor(
-  //       std::span<const uint8_t>(warmupRgb.data(), warmupRgb.size()),
-  //       kWarmupSide, kWarmupSide, preprocess::kChannels);
-  //   ggml_backend_tensor_set(
-  //       compute_.input, warmupTensor.data(), 0,
-  //       warmupTensor.size() * sizeof(float));
-  //   if (numThreads_ > 0) {
-  //     ggml_backend_cpu_set_n_threads(backend_, numThreads_);
-  //   }
-  //   (void)ggml_backend_graph_compute(backend_, compute_.graph);
-  //   // Read the output back so the warmup is observably symmetric with
-  //   // process(): on some backends the result of compute() only fully
-  //   // materialises after the first tensor_get on the output buffer.
-  //   float warmupLogits[graph::kNumClasses] = {0.0F};
-  //   ggml_backend_tensor_get(
-  //       compute_.output_1, warmupLogits, 0, sizeof(warmupLogits));
-  //   (void)warmupLogits;
-  // }
-
   loaded_ = true;
-
-  QLOG(
-      qvac_lib_inference_addon_cpp::logger::Priority::INFO,
-      std::string("ClassificationModel loaded (") +
-          std::to_string(labels_.size()) + " classes)");
 }
 
 std::any ClassificationModel::process(const std::any& input) {
@@ -235,7 +211,6 @@ std::any ClassificationModel::process(const std::any& input) {
       std::span<const uint8_t>(inPtr->data.data(), inPtr->data.size()),
       rawW, rawH, rawC);
 
-
   const size_t expected = static_cast<size_t>(preprocess::kInputSize) *
                           preprocess::kInputSize * preprocess::kChannels;
   if (inputTensor.size() != expected) {
@@ -263,95 +238,9 @@ std::any ClassificationModel::process(const std::any& input) {
 
   // Retrieve logits.
   ClassifyOutput output;
-  // float logits[graph::kNumClasses] = {0.0F};
-  // output.data_1.resize(ggml_nelements(compute_.output_1));
-  // output.data_2.resize(ggml_nelements(compute_.output_2));
-  // output.data_3.resize(ggml_nelements(compute_.output_3));
   output.data_4.resize(ggml_nelements(compute_.output_4));
-  //ggml_backend_tensor_get(
-  //   compute_.output_1, output.data_1.data(), 0, ggml_nbytes(compute_.output_1));
-  // ggml_backend_tensor_get(
-  //    compute_.output_2, output.data_2.data(), 0, ggml_nbytes(compute_.output_2));
-  // ggml_backend_tensor_get(
-  //    compute_.output_3, output.data_3.data(), 0, ggml_nbytes(compute_.output_3));
   ggml_backend_tensor_get(
       compute_.output_4, output.data_4.data(), 0, ggml_nbytes(compute_.output_4));
-
-  // std::vector<float> probs = softmax(std::span<const float>(logits, graph::kNumClasses));
-
-  // Build sorted result list. Use labels parsed from GGUF metadata (or the
-  // hardcoded fallback) so caller receives human-readable names.
-  // ClassifyOutput output;
-  // output.results.reserve(probs.size());
-  // for (size_t i = 0; i < probs.size(); ++i) {
-  //   const std::string label = i < labels_.size()
-  //                                 ? labels_[i]
-  //                                 : std::string("class_") + std::to_string(i);
-  //   output.results.push_back({label, probs[i]});
-  // }
-
-  // Sort descending by confidence, with explicit handling of non-finite
-  // values (NaN/Inf): treat them as smaller than any finite value so
-  // the ordering remains strict-weak even with degenerate inputs.
-  // The defensive softmax above should never produce non-finite
-  // probabilities, but we keep the guard so a future upstream bug or
-  // numerical edge case in the ggml CPU backend cannot break sort and
-  // silently land a non-maximum-confidence class at index 0.
-  // std::sort(
-  //     output_vec.results.begin(),
-  //     output_vec.results.end(),
-  //     [](const ClassifyResult& a, const ClassifyResult& b) {
-  //       const bool aFinite = std::isfinite(a.confidence);
-  //       const bool bFinite = std::isfinite(b.confidence);
-  //       if (aFinite != bFinite) {
-  //         return aFinite;
-  //       }
-  //       if (!aFinite && !bFinite) {
-  //         return false;
-  //       }
-  //       return a.confidence > b.confidence;
-  //     });
-
-  // Optional per-inference trace. Off unless QVAC_CLASSIFICATION_TRACE=1
-  // in the environment. Designed to give us actionable data for
-  // platform-specific numerical issues (e.g. win32 CI meal_1 anomaly)
-  // without requiring any rebuild or workflow change -- a test job
-  // can simply set the env var to get the full picture.
-  // if (traceEnabled()) {
-  //   std::fprintf(
-  //       stderr,
-  //       "[qvac-classify] logits=[%.6f, %.6f, %.6f] "
-  //       "probs_before_sort=[%.6f, %.6f, %.6f] "
-  //       "sorted=[{%s:%.6f}, {%s:%.6f}, {%s:%.6f}]\n",
-  //       static_cast<double>(logits[0]),
-  //       static_cast<double>(logits[1]),
-  //       static_cast<double>(logits[2]),
-  //       static_cast<double>(probs[0]),
-  //       static_cast<double>(probs[1]),
-  //       static_cast<double>(probs[2]),
-  //       output.results.size() > 0 ? output.results[0].label.c_str() : "-",
-  //       output.results.size() > 0
-  //           ? static_cast<double>(output.results[0].confidence)
-  //           : 0.0,
-  //       output.results.size() > 1 ? output.results[1].label.c_str() : "-",
-  //       output.results.size() > 1
-  //           ? static_cast<double>(output.results[1].confidence)
-  //           : 0.0,
-  //       output.results.size() > 2 ? output.results[2].label.c_str() : "-",
-  //       output.results.size() > 2
-  //           ? static_cast<double>(output.results[2].confidence)
-  //           : 0.0);
-  //   std::fflush(stderr);
-  // }
-
-  // Apply topK filter if requested and within bounds.
-  // if (inPtr->topK > 0 && inPtr->topK < output_vec.results.size()) {
-  //   output_vec.results.resize(inPtr->topK);
-  // }
-
-  // const auto t1 = std::chrono::steady_clock::now();
-  // lastInferenceUs_ = static_cast<uint64_t>(
-  //     std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
 
   return std::any(std::move(output));
 }

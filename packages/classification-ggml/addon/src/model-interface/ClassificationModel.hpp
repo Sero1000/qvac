@@ -89,6 +89,10 @@ public:
   /// libggml's default (usually std::thread::hardware_concurrency).
   void setNumThreads(int threads);
 
+  /// Runs the network on an already-preprocessed FP32 WHCN tensor.
+  /// The tensor must match the graph input shape exactly.
+  ClassifyOutput runTensor(std::span<const float> inputTensor);
+
 private:
   // Direct members instead of a PIMPL struct: the addon is internal,
   // ggml types only flow into this header (not into any package
