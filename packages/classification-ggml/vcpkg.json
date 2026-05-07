@@ -2,8 +2,8 @@
   "dependencies": [
     {
       "name": "ggml",
-      "version>=": "2026-01-30#5",
-      "default-features": false
+      "default-features": false,
+      "version>=": "2026-01-30#5"
     },
     {
       "name": "qvac-lib-inference-addon-cpp",
@@ -13,7 +13,18 @@
       "name": "qvac-lint-cpp",
       "version>=": "1.4.4#2"
     },
+    {
+      "name": "onnxruntime",
+      "platform": "osx | ios",
+      "version>=": "1.23.2"
+    },
     "stb"
+  ],
+  "overrides": [
+    {
+      "name": "flatbuffers",
+      "version": "23.5.26"
+    }
   ],
   "features": {
     "tests": {

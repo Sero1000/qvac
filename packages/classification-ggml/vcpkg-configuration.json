@@ -1,17 +1,49 @@
 {
   "default-registry": {
     "kind": "git",
-    "baseline": "a9eae49a7c95a63755c0b44ecf9d74b0a00e181b",
+    "baseline": "932d5d989cfea69384e0668af3520a86a3f72322",
     "repository": "https://github.com/tetherto/qvac-registry-vcpkg.git"
   },
   "registries": [
     {
       "kind": "git",
-      "baseline": "16c71a39e5a0fc0bdb3fad03beef8f38ee00ee3b",
+      "baseline": "77826283b4676c526da3a5c59e6717e3775ba722",
       "repository": "https://github.com/microsoft/vcpkg",
       "packages": [
+        "abseil",
+        "benchmark",
+        "boost-cmake",
+        "boost-config",
+        "boost-headers",
+        "boost-mp11",
+        "boost-uninstall",
+        "cpuinfo",
+        "cxxopts",
+        "date",
+        "directx-headers",
+        "dlpack",
+        "eigen3",
+        "flatbuffers",
+        "fp16",
+        "fxdiv",
         "gtest",
-        "stb"
+        "mimalloc",
+        "ms-gsl",
+        "nlohmann-json",
+        "onnx",
+        "onnxruntime",
+        "optional-lite",
+        "psimd",
+        "protobuf",
+        "re2",
+        "safeint",
+        "stb",
+        "utf8-range",
+        "vcpkg-boost",
+        "vcpkg-cmake",
+        "vcpkg-cmake-config",
+        "wil",
+        "zlib"
       ]
     }
   ]
