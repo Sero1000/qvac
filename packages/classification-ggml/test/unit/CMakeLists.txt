@@ -88,11 +88,11 @@ if(onnxruntime_FOUND)
   )
   target_compile_features(classification-onnx-cpu-benchmark-app PRIVATE cxx_std_20)
   target_compile_options(classification-onnx-cpu-benchmark-app PRIVATE -Wall -Wextra -Wfatal-errors -g)
-  target_compile_definitions(
-    classification-onnx-cpu-benchmark-app
-    PRIVATE
-      DEFAULT_DB_MOBILENET_ONNX_PATH="${CMAKE_SOURCE_DIR}/../../onnx_models/db_mobilenet_v3_large.onnx"
-  )
+  # target_compile_definitions(
+  #   classification-onnx-cpu-benchmark-app
+  #   PRIVATE
+  #     DEFAULT_DB_MOBILENET_ONNX_PATH="${CMAKE_SOURCE_DIR}/../../onnx_models/db_mobilenet_v3_large.onnx"
+  # )
   target_link_libraries(
     classification-onnx-cpu-benchmark-app
     PRIVATE

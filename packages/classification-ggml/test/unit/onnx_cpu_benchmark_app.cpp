@@ -9,15 +9,10 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
-#include <random>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#ifndef DEFAULT_DB_MOBILENET_ONNX_PATH
-#define DEFAULT_DB_MOBILENET_ONNX_PATH "onnx_models/db_mobilenet_v3_large.onnx"
-#endif
 
 namespace {
 
@@ -26,21 +21,33 @@ using Clock = std::chrono::steady_clock;
 constexpr int64_t DYNAMIC_BATCH = 1;
 constexpr int64_t DYNAMIC_CHANNEL = 3;
 constexpr int64_t DYNAMIC_SPATIAL = 1024;
-constexpr uint32_t RANDOM_SEED = 12345;
+constexpr size_t MAX_ARG_COUNT = 4;
+constexpr size_t OUTPUT_SAMPLE_COUNT = 20;
+constexpr float SAMPLE_INPUT_VALUE = 0.5F;
 constexpr double P50 = 50.0;
 constexpr double P95 = 95.0;
 
 struct Config {
-  std::string modelPath{DEFAULT_DB_MOBILENET_ONNX_PATH};
+  std::string modelPath;
   int warmupRuns{3};
   int benchmarkRuns{20};
 };
 
+struct PreparedInputTensor {
+  std::vector<float> floatData;
+  std::vector<Ort::Float16_t> float16Data;
+  Ort::Value tensor{nullptr};
+};
+
+struct OutputVectorSample {
+  std::vector<double> firstValues;
+  std::vector<double> lastValues;
+};
+
 void printUsage(std::string_view appName) {
   std::cout << "Usage: " << appName
-            << " [model_path] [benchmark_runs] [warmup_runs]\n"
+            << " <model_path> [benchmark_runs] [warmup_runs]\n"
             << "Defaults:\n"
-            << "  model_path: " << DEFAULT_DB_MOBILENET_ONNX_PATH << '\n'
             << "  benchmark_runs: 20\n"
             << "  warmup_runs: 3\n";
 }
@@ -65,6 +72,9 @@ std::vector<std::string> argsFromArgv(int argc, char** argv) {
 
 Config parseArgs(const std::vector<std::string>& args) {
   Config config;
+  if (args.size() > MAX_ARG_COUNT) {
+    throw std::invalid_argument("too many arguments");
+  }
   if (args.size() > 1) {
     const std::string& firstArg = args[1];
     if (firstArg == "-h" || firstArg == "--help") {
@@ -73,14 +83,15 @@ Config parseArgs(const std::vector<std::string>& args) {
     }
     config.modelPath = firstArg;
   }
+  if (config.modelPath.empty()) {
+    printUsage(args[0]);
+    throw std::invalid_argument("model_path is required");
+  }
   if (args.size() > 2) {
     config.benchmarkRuns = parsePositiveInt(args[2], "benchmark_runs");
   }
   if (args.size() > 3) {
     config.warmupRuns = parsePositiveInt(args[3], "warmup_runs");
-  }
-  if (args.size() > 4) {
-    throw std::invalid_argument("too many arguments");
   }
   return config;
 }
@@ -121,11 +132,14 @@ size_t elementCount(const std::vector<int64_t>& shape) {
                          });
 }
 
-void fillRandomInput(std::vector<float>& input) {
-  std::mt19937 rng{RANDOM_SEED};
-  std::uniform_real_distribution<float> distribution{0.0F, 1.0F};
-  std::generate(input.begin(), input.end(),
-                [&]() { return distribution(rng); });
+void fillConstantInput(std::vector<float>& input) {
+  std::fill(input.begin(), input.end(), SAMPLE_INPUT_VALUE);
+}
+
+void fillConstantInput(std::vector<Ort::Float16_t>& input) {
+  for (auto& element : input) {
+    element = Ort::Float16_t{SAMPLE_INPUT_VALUE};
+  }
 }
 
 std::vector<const char*> rawNames(const std::vector<std::string>& names) {
@@ -135,6 +149,73 @@ std::vector<const char*> rawNames(const std::vector<std::string>& names) {
     result.push_back(name.c_str());
   }
   return result;
+}
+
+PreparedInputTensor createInputTensor(
+    ONNXTensorElementDataType inputElementType, size_t inputElements,
+    const std::vector<int64_t>& inputShape, const Ort::MemoryInfo& memoryInfo) {
+  PreparedInputTensor preparedInput;
+  if (inputElementType == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    preparedInput.float16Data.resize(inputElements);
+    fillConstantInput(preparedInput.float16Data);
+    preparedInput.tensor = Ort::Value::CreateTensor<Ort::Float16_t>(
+        memoryInfo, preparedInput.float16Data.data(),
+        preparedInput.float16Data.size(), inputShape.data(), inputShape.size());
+    return preparedInput;
+  }
+
+  preparedInput.floatData.resize(inputElements);
+  fillConstantInput(preparedInput.floatData);
+  preparedInput.tensor = Ort::Value::CreateTensor<float>(
+      memoryInfo, preparedInput.floatData.data(), preparedInput.floatData.size(),
+      inputShape.data(), inputShape.size());
+  return preparedInput;
+}
+
+OutputVectorSample sampleOutputVector(Ort::Value& output) {
+  OutputVectorSample sample;
+  auto outputInfo = output.GetTensorTypeAndShapeInfo();
+  const size_t count = outputInfo.GetElementCount();
+  const size_t firstCount = std::min<size_t>(count, OUTPUT_SAMPLE_COUNT);
+  const size_t lastCount = std::min<size_t>(count, OUTPUT_SAMPLE_COUNT);
+  sample.firstValues.reserve(firstCount);
+  sample.lastValues.reserve(lastCount);
+
+  if (outputInfo.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    const auto* values = output.GetTensorData<float>();
+    const std::span<const float> outputValues{values, count};
+    for (size_t i = 0; i < firstCount; ++i) {
+      sample.firstValues.push_back(outputValues[i]);
+    }
+    for (size_t i = count - lastCount; i < count; ++i) {
+      sample.lastValues.push_back(outputValues[i]);
+    }
+  } else if (outputInfo.GetElementType() ==
+             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    const auto* values = output.GetTensorData<Ort::Float16_t>();
+    const std::span<const Ort::Float16_t> outputValues{values, count};
+    for (size_t i = 0; i < firstCount; ++i) {
+      sample.firstValues.push_back(outputValues[i].ToFloat());
+    }
+    for (size_t i = count - lastCount; i < count; ++i) {
+      sample.lastValues.push_back(outputValues[i].ToFloat());
+    }
+  }
+  return sample;
+}
+
+void printOutputValues(std::string_view label,
+                       const std::vector<double>& values) {
+  std::cout << "  " << label << ":";
+  if (values.empty()) {
+    std::cout << " <none>\n";
+    return;
+  }
+
+  for (size_t i = 0; i < values.size(); ++i) {
+    std::cout << (i == 0 ? " " : ", ") << values[i];
+  }
+  std::cout << '\n';
 }
 
 std::vector<std::string> getInputNames(Ort::Session& session,
@@ -209,29 +290,32 @@ int main(int argc, char** argv) {
 
     Ort::TypeInfo inputTypeInfo = session.GetInputTypeInfo(0);
     auto tensorInfo = inputTypeInfo.GetTensorTypeAndShapeInfo();
-    if (tensorInfo.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-      std::cerr << "Expected float input tensor for input: " << inputNames[0]
-                << '\n';
+    const auto inputElementType = tensorInfo.GetElementType();
+    const std::vector<int64_t> rawInputShape = tensorInfo.GetShape();
+    if (inputElementType != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+        inputElementType != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      std::cerr << "Expected float or float16 input tensor for input: "
+                << inputNames[0] << '\n';
       return 1;
     }
 
     const std::vector<int64_t> inputShape =
-        resolveInputShape(tensorInfo.GetShape());
+        resolveInputShape(rawInputShape);
     const size_t inputElements = elementCount(inputShape);
-    std::vector<float> inputData(inputElements);
-    fillRandomInput(inputData);
 
     std::cout << "Input: " << inputNames[0] << " [";
     for (size_t i = 0; i < inputShape.size(); ++i) {
       std::cout << inputShape[i] << (i + 1 == inputShape.size() ? "" : ", ");
     }
-    std::cout << "] (" << inputElements << " float values)\n";
+    std::cout << "] (" << inputElements
+              << (inputElementType == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16
+                      ? " float16 values)\n"
+                      : " float values)\n");
 
     Ort::MemoryInfo memoryInfo =
         Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    auto inputTensor = Ort::Value::CreateTensor<float>(
-        memoryInfo, inputData.data(), inputData.size(), inputShape.data(),
-        inputShape.size());
+    PreparedInputTensor preparedInput = createInputTensor(
+        inputElementType, inputElements, inputShape, memoryInfo);
 
     const std::vector<const char*> inputNamePtrs = rawNames(inputNames);
     const std::vector<const char*> outputNamePtrs = rawNames(outputNames);
@@ -239,7 +323,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < config.warmupRuns; ++i) {
       auto outputs =
           session.Run(Ort::RunOptions{nullptr}, inputNamePtrs.data(),
-                      &inputTensor, 1, outputNamePtrs.data(),
+                      &preparedInput.tensor, 1, outputNamePtrs.data(),
                       outputNamePtrs.size());
       (void)outputs;
     }
@@ -247,13 +331,13 @@ int main(int argc, char** argv) {
     std::vector<double> timingsMs;
     timingsMs.reserve(static_cast<size_t>(config.benchmarkRuns));
     size_t outputElementCount = 0;
-    double outputChecksum = 0.0;
+    OutputVectorSample outputSample;
 
     for (int i = 0; i < config.benchmarkRuns; ++i) {
       const auto start = Clock::now();
       auto outputs =
           session.Run(Ort::RunOptions{nullptr}, inputNamePtrs.data(),
-                      &inputTensor, 1, outputNamePtrs.data(),
+                      &preparedInput.tensor, 1, outputNamePtrs.data(),
                       outputNamePtrs.size());
       const auto end = Clock::now();
 
@@ -261,21 +345,16 @@ int main(int argc, char** argv) {
           std::chrono::duration<double, std::milli>(end - start).count());
 
       outputElementCount = 0;
-      outputChecksum = 0.0;
+      outputSample = OutputVectorSample{};
       for (auto& output : outputs) {
         if (!output.IsTensor()) {
           continue;
         }
         auto outputInfo = output.GetTensorTypeAndShapeInfo();
         outputElementCount += outputInfo.GetElementCount();
-        if (outputInfo.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-          const auto* values = output.GetTensorData<float>();
-          const size_t count = outputInfo.GetElementCount();
-          const size_t sampleCount = std::min<size_t>(count, 1024);
-          const std::span<const float> outputValues{values, count};
-          for (const float value : outputValues.first(sampleCount)) {
-            outputChecksum += value;
-          }
+        if (outputSample.firstValues.empty() &&
+            outputSample.lastValues.empty()) {
+          outputSample = sampleOutputVector(output);
         }
       }
     }
@@ -293,8 +372,9 @@ int main(int argc, char** argv) {
                                                 timingsMs.end())
               << " ms\n"
               << "  output tensors: " << outputNames.size() << '\n'
-              << "  output elements: " << outputElementCount << '\n'
-              << "  sampled output checksum: " << outputChecksum << '\n';
+              << "  output elements: " << outputElementCount << '\n';
+    printOutputValues("output first 20", outputSample.firstValues);
+    printOutputValues("output last 20", outputSample.lastValues);
 
     return 0;
   } catch (const std::exception& ex) {

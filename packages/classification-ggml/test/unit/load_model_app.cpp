@@ -7,7 +7,6 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
-#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -16,7 +15,7 @@
 #include "model-interface/ClassificationModel.hpp"
 
 #ifndef DEFAULT_DB_MOBILENET_GGUF_PATH
-#define DEFAULT_DB_MOBILENET_GGUF_PATH "weights/db_mobilenet_v3_large.gguf"
+#define DEFAULT_DB_MOBILENET_GGUF_PATH "weights/new_db_mobilenet_v3_large_f16.gguf"
 #endif
 
 namespace {
@@ -28,7 +27,6 @@ using Clock = std::chrono::steady_clock;
 constexpr uint32_t INPUT_WIDTH = 1024;
 constexpr uint32_t INPUT_HEIGHT = 1024;
 constexpr uint32_t INPUT_CHANNELS = 3;
-constexpr uint32_t RANDOM_SEED = 12345;
 constexpr size_t CHECKSUM_SAMPLE_COUNT = 1024;
 constexpr size_t MAX_ARG_COUNT = 5;
 constexpr double P50 = 50.0;
@@ -113,11 +111,9 @@ size_t inputElementCount() {
   return width * height * channels;
 }
 
-std::vector<float> makeRandomInputTensor() {
+std::vector<float> makeSequentialInputTensor() {
   std::vector<float> input(inputElementCount());
-  std::mt19937 rng{RANDOM_SEED};
-  std::uniform_real_distribution<float> distribution{0.0F, 1.0F};
-  std::generate(input.begin(), input.end(), [&]() { return distribution(rng); });
+  std::iota(input.begin(), input.end(), 0.0F);
   return input;
 }
 
@@ -157,7 +153,7 @@ int main(int argc, char** argv) {
     model.setNumThreads(config.threads);
     model.load();
 
-    const std::vector<float> input = makeRandomInputTensor();
+    const std::vector<float> input = makeSequentialInputTensor();
     const std::span<const float> inputTensor{input};
     std::cout << "Input tensor: [" << INPUT_CHANNELS << ", " << INPUT_HEIGHT
               << ", " << INPUT_WIDTH << "] (" << inputTensor.size()
