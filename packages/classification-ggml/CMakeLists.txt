@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-option(BUILD_TESTING "Build tests" OFF)
+option(BUILD_TESTING "Build tests" ON)
 option(ENABLE_COVERAGE "Enable coverage instrumentation for unit tests" OFF)
 if(BUILD_TESTING)
   list(APPEND VCPKG_MANIFEST_FEATURES "tests")
