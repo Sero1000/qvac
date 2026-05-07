@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <iostream>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -32,6 +33,7 @@ using qvac_errors::general_error::InvalidArgument;
 
 namespace {
 constexpr const char* kModelName = "mobilenetv3-small-ggml-classification";
+constexpr size_t INPUT_EDGE_SAMPLE_COUNT = 20;
 }
 
 ClassificationModel::ClassificationModel(std::string modelPath)
@@ -155,6 +157,22 @@ bool traceEnabled() {
   return v != nullptr && v[0] == '1';
 }
 
+void printInputEdgeSamples(std::span<const float> values) {
+  const size_t sampleCount = std::min(values.size(), INPUT_EDGE_SAMPLE_COUNT);
+
+  std::cout << "  input first " << sampleCount << " elements:";
+  for (const float value : values.first(sampleCount)) {
+    std::cout << ' ' << value;
+  }
+  std::cout << '\n';
+
+  std::cout << "  input last " << sampleCount << " elements:";
+  for (const float value : values.last(sampleCount)) {
+    std::cout << ' ' << value;
+  }
+  std::cout << '\n';
+}
+
 } // namespace
 
 void ClassificationModel::load() {
@@ -218,6 +236,7 @@ std::any ClassificationModel::process(const std::any& input) {
         InternalError, "ClassificationModel: preprocessed tensor has wrong size");
   }
 
+  printInputEdgeSamples(inputTensor);
   ggml_backend_tensor_set(
       compute_.input, inputTensor.data(), 0,
       inputTensor.size() * sizeof(float));
