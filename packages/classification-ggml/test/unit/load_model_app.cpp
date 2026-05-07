@@ -1,13 +1,16 @@
 #include <algorithm>
+#include <any>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <numeric>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -27,7 +30,9 @@ using Clock = std::chrono::steady_clock;
 constexpr uint32_t INPUT_WIDTH = 1024;
 constexpr uint32_t INPUT_HEIGHT = 1024;
 constexpr uint32_t INPUT_CHANNELS = 3;
+constexpr std::string_view INPUT_IMAGE_PATH = "../../doctr/tests/test_image.png";
 constexpr size_t CHECKSUM_SAMPLE_COUNT = 1024;
+constexpr size_t OUTPUT_EDGE_SAMPLE_COUNT = 20;
 constexpr size_t MAX_ARG_COUNT = 5;
 constexpr double P50 = 50.0;
 constexpr double P95 = 95.0;
@@ -111,9 +116,9 @@ size_t inputElementCount() {
   return width * height * channels;
 }
 
-std::vector<float> makeSequentialInputTensor() {
+std::vector<float> makeInputTensor() {
   std::vector<float> input(inputElementCount());
-  std::iota(input.begin(), input.end(), 0.0F);
+  std::fill(input.begin(), input.end(), 1.0F);
   return input;
 }
 
@@ -138,6 +143,48 @@ double sampledChecksum(std::span<const float> values) {
   return checksum;
 }
 
+void printOutputEdgeSamples(std::span<const float> values) {
+  const size_t sampleCount = std::min(values.size(), OUTPUT_EDGE_SAMPLE_COUNT);
+
+  std::cout << "  output first " << sampleCount << " elements:";
+  for (const float value : values.first(sampleCount)) {
+    std::cout << ' ' << value;
+  }
+  std::cout << '\n';
+
+  std::cout << "  output last " << sampleCount << " elements:";
+  for (const float value : values.last(sampleCount)) {
+    std::cout << ' ' << value;
+  }
+  std::cout << '\n';
+}
+
+std::vector<uint8_t> loadImageBytes(const std::filesystem::path& imagePath) {
+  if (!std::filesystem::exists(imagePath)) {
+    throw std::runtime_error("Input image does not exist: " + imagePath.string());
+  }
+
+  const uintmax_t fileSize = std::filesystem::file_size(imagePath);
+  if (fileSize > static_cast<uintmax_t>(std::numeric_limits<size_t>::max()) ||
+      fileSize >
+          static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
+    throw std::overflow_error("input image is too large to read");
+  }
+
+  std::vector<char> bytes(static_cast<size_t>(fileSize));
+  std::ifstream file(imagePath, std::ios::binary);
+  if (!file) {
+    throw std::runtime_error("Failed to open input image: " + imagePath.string());
+  }
+
+  file.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  if (!file && !bytes.empty()) {
+    throw std::runtime_error("Failed to read input image: " + imagePath.string());
+  }
+
+  return {bytes.begin(), bytes.end()};
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -153,18 +200,21 @@ int main(int argc, char** argv) {
     model.setNumThreads(config.threads);
     model.load();
 
-    const std::vector<float> input = makeSequentialInputTensor();
-    const std::span<const float> inputTensor{input};
-    std::cout << "Input tensor: [" << INPUT_CHANNELS << ", " << INPUT_HEIGHT
-              << ", " << INPUT_WIDTH << "] (" << inputTensor.size()
-              << " float values)\n";
+    const std::filesystem::path inputImagePath{INPUT_IMAGE_PATH};
+    classification::ClassifyInput input;
+    input.data = loadImageBytes(inputImagePath);
+    std::cout << "Input image: " << inputImagePath << " (" << input.data.size()
+              << " bytes)\n";
     std::cout << "Threads: "
               << (config.threads == 0 ? "ggml default"
                                       : std::to_string(config.threads))
               << '\n';
 
     for (int i = 0; i < config.warmupRuns; ++i) {
-      const classification::ClassifyOutput output = model.runTensor(inputTensor);
+      const auto output =
+          std::any_cast<classification::ClassifyOutput>(model.process(input));
+      printOutputEdgeSamples(output.data_4);
+
       (void)output;
     }
 
@@ -172,10 +222,12 @@ int main(int argc, char** argv) {
     timingsMs.reserve(static_cast<size_t>(config.benchmarkRuns));
     size_t outputElementCount = 0;
     double outputChecksum = 0.0;
+    std::vector<float> lastOutput;
 
     for (int i = 0; i < config.benchmarkRuns; ++i) {
       const auto start = Clock::now();
-      const classification::ClassifyOutput output = model.runTensor(inputTensor);
+      const auto output =
+          std::any_cast<classification::ClassifyOutput>(model.process(input));
       const auto end = Clock::now();
 
       timingsMs.push_back(
@@ -183,6 +235,7 @@ int main(int argc, char** argv) {
 
       outputElementCount = output.data_4.size();
       outputChecksum = sampledChecksum(output.data_4);
+      lastOutput = output.data_4;
     }
 
     std::cout << "GGML CPU benchmark complete\n"
@@ -200,6 +253,7 @@ int main(int argc, char** argv) {
               << "  output tensors: 1\n"
               << "  output elements: " << outputElementCount << '\n'
               << "  sampled output checksum: " << outputChecksum << '\n';
+
 
     return 0;
   } catch (const std::exception& ex) {
