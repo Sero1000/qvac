@@ -1,6 +1,7 @@
 #include "ClassificationModel.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -10,8 +11,10 @@
 #include <iostream>
 #include <numeric>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <ggml-alloc.h>
@@ -34,6 +37,94 @@ using qvac_errors::general_error::InvalidArgument;
 namespace {
 constexpr const char* kModelName = "mobilenetv3-small-ggml-classification";
 constexpr size_t INPUT_EDGE_SAMPLE_COUNT = 20;
+
+std::string lowerAscii(std::string value) {
+  for (char& character : value) {
+    character = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(character)));
+  }
+  return value;
+}
+
+const char* deviceTypeName(enum ggml_backend_dev_type type) {
+  switch (type) {
+    case GGML_BACKEND_DEVICE_TYPE_CPU:
+      return "cpu";
+    case GGML_BACKEND_DEVICE_TYPE_GPU:
+      return "gpu";
+    case GGML_BACKEND_DEVICE_TYPE_IGPU:
+      return "igpu";
+    case GGML_BACKEND_DEVICE_TYPE_ACCEL:
+      return "accelerator";
+  }
+  return "unknown";
+}
+
+std::string availableDeviceList() {
+  std::ostringstream out;
+  const size_t deviceCount = ggml_backend_dev_count();
+  if (deviceCount == 0) {
+    return "<none>";
+  }
+  for (size_t i = 0; i < deviceCount; ++i) {
+    ggml_backend_dev_t device = ggml_backend_dev_get(i);
+    if (i > 0) {
+      out << ", ";
+    }
+    out << ggml_backend_dev_name(device) << " ("
+        << deviceTypeName(ggml_backend_dev_type(device)) << ")";
+  }
+  return out.str();
+}
+
+std::string backendSelectionSummary(
+    const std::string& requestedDevice, const std::vector<ggml_backend_t>& backends) {
+  std::ostringstream out;
+  out << "ClassificationModel selected ggml device: requested='"
+      << requestedDevice << "', backends='";
+  for (const auto& backend : backends) {
+    out << ggml_backend_name(backend) << ", ";
+  }
+  out << "'";
+
+  for (const auto& backend : backends) {
+    ggml_backend_dev_t device = ggml_backend_get_device(backend);
+    if (device != nullptr) {
+      out << ", device='" << ggml_backend_dev_name(device) << "', type='"
+          << deviceTypeName(ggml_backend_dev_type(device)) << "'";
+    }
+  }
+  out << "'";
+  return out.str();
+}
+
+std::vector<ggml_backend_t> initBackendsForDevice(std::string requestedDevice) {
+  ggml_backend_load_all();
+
+  const std::string normalized = lowerAscii(requestedDevice);
+  std::vector<ggml_backend_t> backends;
+  if (normalized.empty() || normalized == "cpu") {
+    backends.emplace_back(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_ACCEL, nullptr));
+  } else if (normalized == "gpu") {
+    backends.emplace_back(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr));
+  } else if (normalized == "igpu") {
+    backends.emplace_back(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr));
+  } else if (normalized == "accelerator" || normalized == "accel") {
+    backends.emplace_back(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_ACCEL, nullptr));
+  } else if (normalized == "auto" || normalized == "best") {
+    backends.emplace_back(ggml_backend_init_best());
+  } else {
+    backends.emplace_back(ggml_backend_init_by_name(requestedDevice.c_str(), nullptr));
+  }
+
+  backends.emplace_back(ggml_backend_cpu_init());
+
+  QLOG(
+      qvac_lib_inference_addon_cpp::logger::Priority::INFO,
+      backendSelectionSummary(requestedDevice, backends));
+  return backends;
+}
+
 }
 
 ClassificationModel::ClassificationModel(std::string modelPath)
@@ -45,10 +136,12 @@ ClassificationModel::~ClassificationModel() {
   // own backend-allocated buffers) before releasing the backend itself.
   compute_.reset();
   weights_.reset();
-  if (backend_ != nullptr) {
-    ggml_backend_free(backend_);
-    backend_ = nullptr;
+  for (ggml_backend_t backend : backends_) {
+    if (backend != nullptr) {
+      ggml_backend_free(backend);
+    }
   }
+  backends_.clear();
 }
 
 std::string ClassificationModel::getName() const {
@@ -69,20 +162,26 @@ void ClassificationModel::setNumThreads(int threads) {
   numThreads_ = threads;
 }
 
+void ClassificationModel::setDevice(std::string device) {
+  std::scoped_lock lock(mutex_);
+  if (loaded_) {
+    throw StatusError(
+        InvalidArgument,
+        "ClassificationModel device must be set before load()");
+  }
+  device_ = std::move(device);
+}
+
 ClassifyOutput ClassificationModel::runTensor(std::span<const float> inputTensor) {
   ggml_backend_tensor_set(
       compute_.input, inputTensor.data(), 0,
       inputTensor.size() * sizeof(float));
 
-  if (numThreads_ > 0) {
-    ggml_backend_cpu_set_n_threads(backend_, numThreads_);
-  }
-
   ggml_status status =
-      ggml_backend_graph_compute(backend_, compute_.graph);
+      ggml_backend_sched_graph_compute(compute_.sched, compute_.graph);
   if (status != GGML_STATUS_SUCCESS) {
     throw StatusError(
-        InternalError, "ggml_backend_graph_compute failed with status " +
+        InternalError, "ggml_backend_sched_graph_compute failed with status " +
                            std::to_string(static_cast<int>(status)));
   }
 
@@ -186,17 +285,22 @@ void ClassificationModel::load() {
         "ClassificationModel requires a path to mobilenetv3 FP16 GGUF weights");
   }
 
-  backend_ = ggml_backend_cpu_init();
-  if (backend_ == nullptr) {
-    throw StatusError(InternalError, "Failed to initialize ggml CPU backend");
+  backends_ = initBackendsForDevice(device_);
+  if (backends_.empty()) {
+    throw StatusError(
+        InternalError,
+        "Failed to initialize ggml backends for device '" + device_ + "'");
+  }
+  if (numThreads_ > 0) {
+    ggml_backend_cpu_set_n_threads(backends_.back(), numThreads_);
   }
 
   labels_.clear();
-  weights_ = graph::loadWeights(modelPath_, backend_, labels_);
+  weights_ = graph::loadWeights(modelPath_, backends_, labels_);
   if (labels_.empty()) {
     labels_ = {"food", "report", "other"};
   }
-  compute_ = graph::buildGraph(weights_, backend_);
+  compute_ = graph::buildGraph(weights_, backends_);
 
   loaded_ = true;
 }
@@ -236,22 +340,15 @@ std::any ClassificationModel::process(const std::any& input) {
         InternalError, "ClassificationModel: preprocessed tensor has wrong size");
   }
 
-  printInputEdgeSamples(inputTensor);
   ggml_backend_tensor_set(
       compute_.input, inputTensor.data(), 0,
       inputTensor.size() * sizeof(float));
 
-  // Configure CPU threads if requested; otherwise libggml picks a sensible
-  // default based on hardware concurrency.
-  if (numThreads_ > 0) {
-    ggml_backend_cpu_set_n_threads(backend_, numThreads_);
-  }
-
   ggml_status status =
-      ggml_backend_graph_compute(backend_, compute_.graph);
+      ggml_backend_sched_graph_compute(compute_.sched, compute_.graph);
   if (status != GGML_STATUS_SUCCESS) {
     throw StatusError(
-        InternalError, "ggml_backend_graph_compute failed with status " +
+        InternalError, "ggml_backend_sched_graph_compute failed with status " +
                            std::to_string(static_cast<int>(status)));
   }
 

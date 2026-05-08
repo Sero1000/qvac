@@ -80,6 +80,7 @@ struct ComputeGraph {
   std::unique_ptr<struct ggml_context, decltype(&ggml_free)> ctx{
       nullptr, ggml_free};
   struct ggml_cgraph* graph = nullptr;
+  ggml_backend_sched_t sched = nullptr;
   struct ggml_tensor* input = nullptr;
   struct ggml_tensor* output_1 = nullptr;
   struct ggml_tensor* output_2 = nullptr;
@@ -103,16 +104,16 @@ struct ComputeGraph {
 /// `outLabels` with class names read from the `mobilenet.class_N` metadata
 /// keys (or an empty vector if not present).
 WeightsBundle loadWeights(
-    const std::string& ggufPath, ggml_backend_t backend,
+    const std::string& ggufPath, std::vector<ggml_backend_t>& backends,
     std::vector<std::string>& outLabels);
 
 /// Builds the forward compute graph for MobileNetV3-Large using the weights
 /// bundle. The returned ComputeGraph holds its own ggml_context (graph only,
-/// not weights) and a pre-allocated input/output buffer on `backend`.
+/// not weights) and a pre-allocated input/output buffer on `backends`.
 ///
 /// The graph expects the input tensor to be set via
 /// `ggml_backend_tensor_set(graph.input, fp32WhcnBuffer, ...)` before each
 /// `ggml_backend_graph_compute` call.
-ComputeGraph buildGraph(const WeightsBundle& weights, ggml_backend_t backend);
+ComputeGraph buildGraph(const WeightsBundle& weights, std::vector<ggml_backend_t>& backends);
 
 } // namespace qvac_lib_infer_ggml_classification::graph

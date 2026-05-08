@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <any>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -16,6 +15,7 @@
 #include <vector>
 
 #include "model-interface/ClassificationModel.hpp"
+#include "model-interface/ImagePreprocessor.hpp"
 
 #ifndef DEFAULT_DB_MOBILENET_GGUF_PATH
 #define DEFAULT_DB_MOBILENET_GGUF_PATH "weights/new_db_mobilenet_v3_large_f16.gguf"
@@ -33,7 +33,9 @@ constexpr uint32_t INPUT_CHANNELS = 3;
 constexpr std::string_view INPUT_IMAGE_PATH = "../../doctr/tests/test_image.png";
 constexpr size_t CHECKSUM_SAMPLE_COUNT = 1024;
 constexpr size_t OUTPUT_EDGE_SAMPLE_COUNT = 20;
-constexpr size_t MAX_ARG_COUNT = 5;
+constexpr size_t MAX_ARG_COUNT = 4;
+constexpr size_t DEVICE_ARG_INDEX = 2;
+constexpr size_t THREADS_ARG_INDEX = 3;
 constexpr double P50 = 50.0;
 constexpr double P95 = 95.0;
 
@@ -42,24 +44,19 @@ struct Config {
   int warmupRuns{3};
   int benchmarkRuns{20};
   int threads{0};
+  std::string device{"cpu"};
 };
 
 void printUsage(std::string_view appName) {
   std::cout << "Usage: " << appName
-            << " [model_path] [benchmark_runs] [warmup_runs] [threads]\n"
+            << " [model_path] [device] [threads]\n"
             << "Defaults:\n"
             << "  model_path: " << DEFAULT_DB_MOBILENET_GGUF_PATH << '\n'
             << "  benchmark_runs: 20\n"
             << "  warmup_runs: 3\n"
-            << "  threads: 0 (ggml default)\n";
-}
-
-int parsePositiveInt(const std::string& value, std::string_view label) {
-  const int parsed = std::stoi(value);
-  if (parsed <= 0) {
-    throw std::invalid_argument(std::string(label) + " must be positive");
-  }
-  return parsed;
+            << "  threads: 0 (ggml default; CPU backend only)\n"
+            << "  device: cpu (also accepts gpu, igpu, accelerator, auto, "
+               "best, or a registered ggml device name)\n";
 }
 
 int parseNonNegativeInt(const std::string& value, std::string_view label) {
@@ -90,14 +87,11 @@ Config parseArgs(const std::vector<std::string>& args) {
     }
     config.modelPath = firstArg;
   }
-  if (args.size() > 2) {
-    config.benchmarkRuns = parsePositiveInt(args[2], "benchmark_runs");
+  if (args.size() > DEVICE_ARG_INDEX) {
+    config.device = args[DEVICE_ARG_INDEX];
   }
-  if (args.size() > 3) {
-    config.warmupRuns = parsePositiveInt(args[3], "warmup_runs");
-  }
-  if (args.size() > 4) {
-    config.threads = parseNonNegativeInt(args[4], "threads");
+  if (args.size() > THREADS_ARG_INDEX) {
+    config.threads = parseNonNegativeInt(args[THREADS_ARG_INDEX], "threads");
   }
   if (args.size() > MAX_ARG_COUNT) {
     throw std::invalid_argument("too many arguments");
@@ -195,25 +189,29 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    std::cout << "Loading GGML model on CPU: " << config.modelPath << '\n';
+    std::cout << "Loading GGML model on device '" << config.device
+              << "': " << config.modelPath << '\n';
     classification::ClassificationModel model(config.modelPath);
     model.setNumThreads(config.threads);
+    model.setDevice(config.device);
     model.load();
 
     const std::filesystem::path inputImagePath{INPUT_IMAGE_PATH};
-    classification::ClassifyInput input;
-    input.data = loadImageBytes(inputImagePath);
-    std::cout << "Input image: " << inputImagePath << " (" << input.data.size()
-              << " bytes)\n";
+    const std::vector<uint8_t> inputImageBytes = loadImageBytes(inputImagePath);
+    std::cout << "Input image: " << inputImagePath << " ("
+              << inputImageBytes.size() << " bytes)\n";
+    std::vector<float> inputTensor = classification::preprocess::preprocessToTensor(
+        std::span<const uint8_t>(inputImageBytes.data(), inputImageBytes.size()),
+        0, 0, 0);
+    std::cout << "Preprocessed input elements: " << inputTensor.size() << '\n';
     std::cout << "Threads: "
               << (config.threads == 0 ? "ggml default"
                                       : std::to_string(config.threads))
               << '\n';
+    std::cout << "Device: " << config.device << '\n';
 
     for (int i = 0; i < config.warmupRuns; ++i) {
-      const auto output =
-          std::any_cast<classification::ClassifyOutput>(model.process(input));
-      printOutputEdgeSamples(output.data_4);
+      const auto output = model.runTensor(inputTensor);
 
       (void)output;
     }
@@ -226,8 +224,7 @@ int main(int argc, char** argv) {
 
     for (int i = 0; i < config.benchmarkRuns; ++i) {
       const auto start = Clock::now();
-      const auto output =
-          std::any_cast<classification::ClassifyOutput>(model.process(input));
+      const auto output = model.runTensor(inputTensor);
       const auto end = Clock::now();
 
       timingsMs.push_back(
@@ -238,7 +235,7 @@ int main(int argc, char** argv) {
       lastOutput = output.data_4;
     }
 
-    std::cout << "GGML CPU benchmark complete\n"
+    std::cout << "GGML benchmark complete\n"
               << "  warmup runs: " << config.warmupRuns << '\n'
               << "  measured runs: " << config.benchmarkRuns << '\n'
               << "  mean: " << mean(timingsMs) << " ms\n"

@@ -1,34 +1,45 @@
+#include <onnxruntime/coreml_provider_factory.h>
 #include <onnxruntime/onnxruntime_cxx_api.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <numeric>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include "model-interface/ImagePreprocessor.hpp"
+
 namespace {
+
+namespace preprocess = qvac_lib_infer_ggml_classification::preprocess;
 
 using Clock = std::chrono::steady_clock;
 
 constexpr int64_t DYNAMIC_BATCH = 1;
 constexpr int64_t DYNAMIC_CHANNEL = 3;
 constexpr int64_t DYNAMIC_SPATIAL = 1024;
-constexpr size_t MAX_ARG_COUNT = 4;
+constexpr size_t MAX_ARG_COUNT = 5;
 constexpr size_t OUTPUT_SAMPLE_COUNT = 20;
-constexpr float SAMPLE_INPUT_VALUE = 0.5F;
 constexpr double P50 = 50.0;
 constexpr double P95 = 95.0;
+constexpr std::string_view INPUT_IMAGE_PATH = "../../doctr/tests/test_image.png";
 
 struct Config {
   std::string modelPath;
+  std::string device{"cpu"};
   int warmupRuns{3};
   int benchmarkRuns{20};
 };
@@ -46,8 +57,10 @@ struct OutputVectorSample {
 
 void printUsage(std::string_view appName) {
   std::cout << "Usage: " << appName
-            << " <model_path> [benchmark_runs] [warmup_runs]\n"
+            << " <model_path> [device] [benchmark_runs] [warmup_runs]\n"
             << "Defaults:\n"
+            << "  device: cpu (also accepts coreml, gpu, ane, auto, all, "
+               "or coreml-cpu)\n"
             << "  benchmark_runs: 20\n"
             << "  warmup_runs: 3\n";
 }
@@ -88,12 +101,61 @@ Config parseArgs(const std::vector<std::string>& args) {
     throw std::invalid_argument("model_path is required");
   }
   if (args.size() > 2) {
-    config.benchmarkRuns = parsePositiveInt(args[2], "benchmark_runs");
+    config.device = args[2];
   }
   if (args.size() > 3) {
-    config.warmupRuns = parsePositiveInt(args[3], "warmup_runs");
+    config.benchmarkRuns = parsePositiveInt(args[3], "benchmark_runs");
+  }
+  if (args.size() > 4) {
+    config.warmupRuns = parsePositiveInt(args[4], "warmup_runs");
   }
   return config;
+}
+
+std::string lowerAscii(std::string value) {
+  for (char& character : value) {
+    character = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(character)));
+  }
+  return value;
+}
+
+void configureExecutionProvider(
+    Ort::SessionOptions& sessionOptions, const std::string& device) {
+  const std::string normalized = lowerAscii(device);
+  if (normalized.empty() || normalized == "cpu") {
+    std::cout << "Execution provider: CPU\n";
+    return;
+  }
+
+  std::unordered_map<std::string, std::string> providerOptions;
+  if (normalized == "gpu") {
+    providerOptions.emplace(
+        kCoremlProviderOption_MLComputeUnits, "MLComputeUnitsCPUAndGPU");
+  } else if (normalized == "ane") {
+    providerOptions.emplace(
+        kCoremlProviderOption_MLComputeUnits,
+        "MLComputeUnitsCPUAndNeuralEngine");
+  } else if (
+      normalized == "coreml" || normalized == "auto" || normalized == "all") {
+    providerOptions.emplace(
+        kCoremlProviderOption_MLComputeUnits, "MLComputeUnitsAll");
+  } else if (normalized == "coreml-cpu") {
+    providerOptions.emplace(
+        kCoremlProviderOption_MLComputeUnits, "MLComputeUnitsCPUOnly");
+  } else {
+    throw std::invalid_argument(
+        "unsupported device '" + device +
+        "'; expected cpu, coreml, gpu, ane, auto, all, or coreml-cpu");
+  }
+
+  sessionOptions.AppendExecutionProvider("CoreML", providerOptions);
+  std::cout << "Execution provider: CoreML";
+  const auto units = providerOptions.find(kCoremlProviderOption_MLComputeUnits);
+  if (units != providerOptions.end()) {
+    std::cout << " (" << units->second << ")";
+  }
+  std::cout << '\n';
 }
 
 std::vector<int64_t> resolveInputShape(const std::vector<int64_t>& modelShape) {
@@ -132,16 +194,6 @@ size_t elementCount(const std::vector<int64_t>& shape) {
                          });
 }
 
-void fillConstantInput(std::vector<float>& input) {
-  std::fill(input.begin(), input.end(), SAMPLE_INPUT_VALUE);
-}
-
-void fillConstantInput(std::vector<Ort::Float16_t>& input) {
-  for (auto& element : input) {
-    element = Ort::Float16_t{SAMPLE_INPUT_VALUE};
-  }
-}
-
 std::vector<const char*> rawNames(const std::vector<std::string>& names) {
   std::vector<const char*> result;
   result.reserve(names.size());
@@ -151,21 +203,65 @@ std::vector<const char*> rawNames(const std::vector<std::string>& names) {
   return result;
 }
 
+std::vector<uint8_t> loadImageBytes(const std::filesystem::path& imagePath) {
+  if (!std::filesystem::exists(imagePath)) {
+    throw std::runtime_error("Input image does not exist: " + imagePath.string());
+  }
+
+  const uintmax_t fileSize = std::filesystem::file_size(imagePath);
+  if (fileSize > static_cast<uintmax_t>(std::numeric_limits<size_t>::max()) ||
+      fileSize >
+          static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
+    throw std::overflow_error("input image is too large to read");
+  }
+
+  std::vector<char> bytes(static_cast<size_t>(fileSize));
+  std::ifstream file(imagePath, std::ios::binary);
+  if (!file) {
+    throw std::runtime_error("Failed to open input image: " + imagePath.string());
+  }
+
+  file.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  if (!file && !bytes.empty()) {
+    throw std::runtime_error("Failed to read input image: " + imagePath.string());
+  }
+
+  return {bytes.begin(), bytes.end()};
+}
+
+std::vector<float> loadPreprocessedInput(size_t inputElements) {
+  const std::filesystem::path inputImagePath{INPUT_IMAGE_PATH};
+  std::vector<uint8_t> imageBytes = loadImageBytes(inputImagePath);
+  std::vector<float> input =
+      preprocess::preprocessToTensor(imageBytes, 0, 0, 0);
+  if (input.size() != inputElements) {
+    throw std::runtime_error(
+        "preprocessed input element count " + std::to_string(input.size()) +
+        " does not match model input element count " +
+        std::to_string(inputElements));
+  }
+  std::cout << "Input image: " << inputImagePath << " (" << imageBytes.size()
+            << " bytes)\n";
+  return input;
+}
+
 PreparedInputTensor createInputTensor(
     ONNXTensorElementDataType inputElementType, size_t inputElements,
     const std::vector<int64_t>& inputShape, const Ort::MemoryInfo& memoryInfo) {
+  std::vector<float> preprocessedInput = loadPreprocessedInput(inputElements);
   PreparedInputTensor preparedInput;
   if (inputElementType == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-    preparedInput.float16Data.resize(inputElements);
-    fillConstantInput(preparedInput.float16Data);
+    preparedInput.float16Data.reserve(inputElements);
+    for (const float element : preprocessedInput) {
+      preparedInput.float16Data.emplace_back(element);
+    }
     preparedInput.tensor = Ort::Value::CreateTensor<Ort::Float16_t>(
         memoryInfo, preparedInput.float16Data.data(),
         preparedInput.float16Data.size(), inputShape.data(), inputShape.size());
     return preparedInput;
   }
 
-  preparedInput.floatData.resize(inputElements);
-  fillConstantInput(preparedInput.floatData);
+  preparedInput.floatData = std::move(preprocessedInput);
   preparedInput.tensor = Ort::Value::CreateTensor<float>(
       memoryInfo, preparedInput.floatData.data(), preparedInput.floatData.size(),
       inputShape.data(), inputShape.size());
@@ -267,10 +363,12 @@ int main(int argc, char** argv) {
     Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "classification-onnx-cpu-benchmark"};
     Ort::SessionOptions sessionOptions;
     sessionOptions.SetGraphOptimizationLevel(
-        GraphOptimizationLevel::ORT_ENABLE_ALL);
-    sessionOptions.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        GraphOptimizationLevel::ORT_DISABLE_ALL);
+    sessionOptions.SetExecutionMode(ExecutionMode::ORT_PARALLEL);
+    configureExecutionProvider(sessionOptions, config.device);
 
-    std::cout << "Loading ONNX model on CPU: " << config.modelPath << '\n';
+    std::cout << "Loading ONNX model on device '" << config.device
+              << "': " << config.modelPath << '\n';
     Ort::Session session{env, config.modelPath.c_str(), sessionOptions};
 
     Ort::AllocatorWithDefaultOptions allocator;

@@ -61,8 +61,8 @@ struct ClassifyOutput {
   std::vector<float> data_4;
 };
 
-/// MobileNetV3-Small 3-class image classification model backed by libggml's
-/// CPU backend. Owns the GGUF weights, the static compute graph, and the
+/// MobileNetV3-Small 3-class image classification model backed by a selected
+/// libggml backend. Owns the GGUF weights, the static compute graph, and the
 /// pre-allocated input/output tensors. Thread-safety is provided by the
 /// AddonCpp JobRunner (one job at a time per instance), with an internal
 /// mutex guarding `process()` so independent instances remain safe.
@@ -89,6 +89,11 @@ public:
   /// libggml's default (usually std::thread::hardware_concurrency).
   void setNumThreads(int threads);
 
+  /// Select the ggml backend/device to initialize at load time. Supported
+  /// values include "cpu", "gpu", "auto"/"best", or any registered ggml
+  /// device name. Must be called before load().
+  void setDevice(std::string device);
+
   /// Runs the network on an already-preprocessed FP32 WHCN tensor.
   /// The tensor must match the graph input shape exactly.
   ClassifyOutput runTensor(std::span<const float> inputTensor);
@@ -104,7 +109,8 @@ private:
   // because clang-tidy prefers initialised-before-used ordering and
   // the mutex protects access to all of the above.
   std::string modelPath_;
-  ggml_backend_t backend_ = nullptr;
+  std::string device_{"cpu"};
+  std::vector<ggml_backend_t> backends_;
   graph::WeightsBundle weights_;
   graph::ComputeGraph compute_;
   std::vector<std::string> labels_;

@@ -85,6 +85,7 @@ endif()
 if(onnxruntime_FOUND)
   add_executable(classification-onnx-cpu-benchmark-app
     onnx_cpu_benchmark_app.cpp
+    ${CMAKE_SOURCE_DIR}/addon/src/model-interface/ImagePreprocessor.cpp
   )
   target_compile_features(classification-onnx-cpu-benchmark-app PRIVATE cxx_std_20)
   target_compile_options(classification-onnx-cpu-benchmark-app PRIVATE -Wall -Wextra -Wfatal-errors -g)
@@ -97,6 +98,13 @@ if(onnxruntime_FOUND)
     classification-onnx-cpu-benchmark-app
     PRIVATE
       onnxruntime::onnxruntime
+  )
+  target_include_directories(
+    classification-onnx-cpu-benchmark-app
+    PRIVATE
+      ${CMAKE_SOURCE_DIR}/addon/src
+      ${QVAC_LIB_INFERENCE_ADDON_CPP_INCLUDE_DIRS}
+      ${STB_INCLUDE_DIRS}
   )
   if(WIN32)
     target_link_libraries(classification-onnx-cpu-benchmark-app PRIVATE msvcrt.lib)
